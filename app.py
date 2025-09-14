@@ -110,12 +110,11 @@ def send_email(subject, body, to_email, attachment=None):
 # ========== Load DB then Header ==========
 sheets = load_db()
 # ========== Header ==========
-col1, col2 = st.columns([1,4])
-with col1:
+# Centered logo header (logo is the heading)
+cL, cC, cR = st.columns([1,2,1])
+with cC:
     logo_file = get_setting(sheets, "active_logo", "logo1.png")
     st.image(str(ASSETS / logo_file), use_column_width=True)
-with col2:
-    st.title("Woodturners Scheduler")
 
 # ========== Auth (simple) ==========
 st.sidebar.header("Sign in")
@@ -165,19 +164,86 @@ def day_bookings(machine_id, day):
     m = B[(B["machine_id"]==machine_id) & (B["start"]<day_end) & (B["end"]>day_start)].copy()
     return m.sort_values("start")
 
+
+
 def is_open(day, start_t, end_t):
-    # Check closed dates and operating hours
+    import math
     CD = sheets["ClosedDates"]
-    if not CD.empty and (pd.to_datetime(day) == pd.to_datetime(CD["date"]).dt.normalize()).any():
-        return False, "Closed date"
+    day_norm = pd.Timestamp(day).normalize()
+    if not CD.empty:
+        cdn = pd.to_datetime(CD["date"], errors="coerce").dt.normalize()
+        if (cdn == day_norm).any():
+            return False, "Closed date"
+
     OH = sheets["OperatingHours"]
     dow = pd.Timestamp(day).dayofweek
     row = OH[OH["day_of_week"]==dow]
-    if row.empty: return False, "Closed"
-    open_s = str(row.iloc[0]["open_time"]); close_s = str(row.iloc[0]["close_time"])
-    if not open_s or not close_s: return False, "Closed"
-    o_h, o_m = map(int, open_s.split(":")); c_h, c_m = map(int, close_s.split(":"))
-    return (o_h*60+o_m) <= (start_t.hour*60+start_t.minute) and (end_t.hour*60+end_t.minute) <= (c_h*60+c_m), f"{open_s}–{close_s}"
+    if row.empty:
+        return False, "Closed"
+
+    def parse_time_value(val):
+        # Accept pandas/py datetime, time, strings '09:00', '9:30 am', numbers (Excel fractions)
+        try:
+            if val is None: return None
+            if isinstance(val, pd.Timestamp):
+                t = val.to_pydatetime().time()
+                return t.hour, t.minute
+            from datetime import time as dtime, datetime as dtdt
+            if isinstance(val, dtime):
+                return val.hour, val.minute
+            if isinstance(val, dtdt):
+                t = val.time()
+                return t.hour, t.minute
+            # Excel float like 0.5 = 12:00
+            if isinstance(val, (int, float)) and not pd.isna(val):
+                frac = float(val) % 1.0
+                mins = int(round(frac * 24 * 60))
+                h = (mins // 60) % 24
+                m = mins % 60
+                return h, m
+            s = str(val).strip()
+            if not s:
+                return None
+            s_lower = s.lower()
+            # '9.5' as 9:30
+            if re.match(r'^\d+(\.\d+)?$', s_lower):
+                f = float(s_lower)
+                mins = int(round((f % 24) * 60))
+                return mins//60, mins%60
+            # '9', '09:00', '9:30', '9:30am', '09:30 pm'
+            ampm = None
+            if 'am' in s_lower or 'pm' in s_lower:
+                ampm = 'pm' if 'pm' in s_lower else 'am'
+                s_lower = s_lower.replace('am','').replace('pm','').strip()
+            parts = re.split(r'[:h]', s_lower)  # support '9h30'
+            if len(parts)>=1 and parts[0].isdigit():
+                h = int(parts[0])
+                m = int(parts[1]) if len(parts)>=2 and parts[1].isdigit() else 0
+                if ampm:
+                    if ampm=='pm' and h != 12: h += 12
+                    if ampm=='am' and h == 12: h = 0
+                if 0 <= h < 24 and 0 <= m < 60:
+                    return h, m
+        except Exception:
+            return None
+        return None
+
+    open_tuple = parse_time_value(row.iloc[0].get("open_time"))
+    close_tuple = parse_time_value(row.iloc[0].get("close_time"))
+    if not open_tuple or not close_tuple:
+        return False, "Closed"
+
+    o_h, o_m = open_tuple
+    c_h, c_m = close_tuple
+
+    start_min = start_t.hour*60 + start_t.minute
+    end_min   = end_t.hour*60 + end_t.minute
+    open_min  = o_h*60 + o_m
+    close_min = c_h*60 + c_m
+
+    within = (open_min <= start_min) and (end_min <= close_min)
+    return within, f"{o_h:02d}:{o_m:02d}–{c_h:02d}:{c_m:02d}"
+
 
 def next_booking_id():
     B = sheets["Bookings"]
