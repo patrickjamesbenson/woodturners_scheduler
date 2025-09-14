@@ -134,11 +134,58 @@ with tabs[0]:
         if not ok_hours: st.error(f"Outside operating hours ({msg}).")
         if overlap: st.error("Overlaps an existing booking.")
         clicked=st.button("Confirm booking", type="primary", disabled=not(ok_hours and (not overlap)))
-        if clicked and ok_hours and (not overlap):
-            B=sheets["Bookings"]
-            next_id=1 if B.empty else int(pd.to_numeric(B["booking_id"], errors="coerce").fillna(0).max())+1
-            new=pd.DataFrame([[next_id, int(me["user_id"]), mid, datetime.combine(day,start), end_dt, "use","", "confirmed"]], columns=B.columns)
-            sheets["Bookings"]=pd.concat([B,new], ignore_index=True); save_db(sheets); st.success("Booked."); st.rerun()
+        clicked = st.button("Confirm booking", type="primary", key="confirm_booking_btn")
+
+if clicked:
+    # Safety: ensure required tables exist
+    if "Bookings" not in sheets:
+        sheets["Bookings"] = pd.DataFrame(columns=["booking_id","user_id","machine_id","start","end","purpose","notes","status"])
+
+    B = sheets["Bookings"]
+
+    # Coerce datetime for reliable overlap checks
+    def _to_ts(x):
+        return pd.to_datetime(x, errors="coerce")
+
+    # Make sure existing columns are correct dtypes
+    for c in ("start","end"):
+        if c in B.columns:
+            B[c] = _to_ts(B[c])
+
+    start_ts = pd.to_datetime(start_dt)  # you already computed start_dt earlier
+    end_ts   = pd.to_datetime(end_dt)
+
+    # Overlap on same machine (not cancelled)
+    overlap = (
+        (B.get("machine_id", pd.Series(dtype=int)) == int(mid))
+        & (B.get("status", pd.Series(dtype=str)).fillna("confirmed") != "cancelled")
+        & ~( (end_ts <= B.get("start", pd.Series(dtype="datetime64[ns]"))) | (start_ts >= B.get("end", pd.Series(dtype="datetime64[ns]"))) )
+    ).any()
+
+    if overlap:
+        st.error("That time overlaps an existing booking for this machine.")
+    else:
+        # Create next ID
+        if B.empty or "booking_id" not in B.columns:
+            next_id = 1
+        else:
+            next_id = int(pd.to_numeric(B["booking_id"], errors="coerce").fillna(0).max()) + 1
+
+        # Determine who is booking (you already have 'me' / selected user)
+        # 'me' should be a row/dict with 'user_id' for the selected member
+        uid = int(me["user_id"])
+
+        new = pd.DataFrame(
+            [[next_id, uid, int(mid), start_ts, end_ts, "use", "", "confirmed"]],
+            columns=["booking_id","user_id","machine_id","start","end","purpose","notes","status"]
+        )
+
+        sheets["Bookings"] = pd.concat([B, new], ignore_index=True)
+
+        # Persist + clear cache so the rerun reloads fresh data
+        save_db(sheets)
+        st.success("Booked.")
+        st.rerun()
 
 with tabs[1]:
     st.subheader("Calendar")
