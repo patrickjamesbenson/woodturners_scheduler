@@ -26,7 +26,7 @@ def save_db(sheets: dict):
     except Exception:
         pass
 d
-ef get_setting(s,key,default=""):
+def get_setting(s, key, default=""):
     S=s.get("Settings", pd.DataFrame(columns=["key","value"]))
     m=S[S["key"]==key]
     return default if m.empty else str(m.iloc[0]["value"])
