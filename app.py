@@ -504,14 +504,41 @@ with tabs[4]:
                     counts.append(cnt)
                 st.bar_chart(pd.DataFrame({"hour":hours,"bookings":counts}).set_index("hour"))
 
+                # Export day roster CSV
+                roster = D[["Machine","User","start","end","Category","status"]]
+                csv = roster.to_csv(index=False).encode("utf-8")
+                st.download_button("Download day roster (CSV)", data=csv, file_name=f"roster_{day_pick}.csv", mime="text/csv")
+
         st.markdown("---")
         st.markdown("### Week view")
         ws = st.date_input("Week starting (Monday)", value=(date.today()-timedelta(days=date.today().weekday())), key="adm_week_start")
         if not B.empty:
-            B2 = B.copy(); B2["start_date"] = pd.to_datetime(B2["start"]).dt.date
+            B2 = B.copy(); B2["start"] = pd.to_datetime(B2["start"]); B2["end"] = pd.to_datetime(B2["end"]); B2["start_date"] = B2["start"].dt.date
+
             week_days = [ws + timedelta(days=i) for i in range(7)]
             rows = [{"Date":d, "Total bookings": int((B2["start_date"]==d).sum())} for d in week_days]
             st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+
+            # Utilization per machine (booked hours / open hours)
+            util_rows = []
+            M = sheets["Machines"]
+            for _, m in M.iterrows():
+                mid = int(m["machine_id"]); name = m["machine_name"]
+                total_booked = 0.0; total_open = 0.0
+                for d in week_days:
+                    if is_open_on(sheets, d):
+                        _, o, c = get_operating_hours(sheets)[d.weekday()]
+                        oh, om = map(int, o.split(":")); ch, cm = map(int, c.split(":"))
+                        total_open += ((ch*60+cm)-(oh*60+om))/60.0
+                        day_b = B2[(B2["machine_id"]==mid) & (B2["start_date"]==d)]
+                        for _, r in day_b.iterrows():
+                            hrs = (r["end"] - r["start"]).total_seconds()/3600.0
+                            total_booked += hrs if str(r.get("category","Usage"))=="Usage" else 0.0
+                util = (total_booked/total_open*100.0) if total_open>0 else 0.0
+                util_rows.append({"Machine":name,"Booked hours":round(total_booked,2),"Open hours":round(total_open,2),"Utilization %":round(util,1)})
+            util_df = pd.DataFrame(util_rows).sort_values("Utilization %", ascending=False)
+            st.dataframe(util_df, hide_index=True, use_container_width=True)
+            st.download_button("Download week utilization (CSV)", data=util_df.to_csv(index=False).encode("utf-8"), file_name=f"utilization_{ws}.csv", mime="text/csv")
 
         st.markdown("---")
         st.markdown("### Reschedule a booking")
@@ -596,11 +623,13 @@ with tabs[4]:
             pct_row = sheets["DiscountReasons"].loc[sheets["DiscountReasons"]["reason"]==reason]
             if not pct_row.empty: pct_default = int(pct_row.iloc[0]["default_pct"])
         pct = st.number_input("Discount %", min_value=0, max_value=100, value=pct_default, key="sub_pct")
+        auto_months = st.number_input("Auto-renew (months, 0 = off)", min_value=0, max_value=36, value=0, step=1, key="sub_auto")
         paid = st.checkbox("Paid", value=False, key="sub_paid")
         notes = st.text_input("Notes", key="sub_notes")
         if st.button("Add subscription", key="sub_add"):
             S = sheets["Subscriptions"]; sid = next_id(S, "subscription_id")
-            new = pd.DataFrame([{"subscription_id":sid,"user_id":uid_sub,"start_date":pd.Timestamp(start_d),"end_date":pd.Timestamp(end_d),"amount":float(amount),"discount_reason":(None if reason=='(none)' else reason),"discount_pct":int(pct),"paid":bool(paid),"notes":notes}])
+            pay_date = pd.Timestamp.today() if bool(paid) else pd.NaT
+            new = pd.DataFrame([{"subscription_id":sid,"user_id":uid_sub,"start_date":pd.Timestamp(start_d),"end_date":pd.Timestamp(end_d),"amount":float(amount),"discount_reason":(None if reason=='(none)' else reason),"discount_pct":int(pct),"paid":bool(paid),"payment_date":pay_date,"auto_renew_months":int(auto_months),"notes":notes}])
             sheets["Subscriptions"] = pd.concat([S,new], ignore_index=True); save_db(sheets); st.success(f"Subscription #{sid} added.")
         st.markdown("#### All subscriptions")
         Sdisp = sheets["Subscriptions"].copy()
@@ -608,7 +637,43 @@ with tabs[4]:
             Sdisp["Member"] = Sdisp["user_id"].map(lambda x: sheets["Users"].loc[sheets["Users"]["user_id"]==x, "name"].values[0])
             today = pd.Timestamp.today().normalize()
             Sdisp["Status"] = Sdisp.apply(lambda r: ("Expired" if pd.to_datetime(r["end_date"])<today else "Active"), axis=1)
-            st.dataframe(Sdisp[["subscription_id","Member","start_date","end_date","amount","discount_reason","discount_pct","paid","Status","notes"]].rename(columns={"subscription_id":"ID"}), hide_index=True, use_container_width=True)
+            cols = ["subscription_id","Member","start_date","end_date","amount","discount_reason","discount_pct","paid","payment_date","auto_renew_months","Status","notes"]
+            st.dataframe(Sdisp[cols].rename(columns={"subscription_id":"ID","payment_date":"Paid on","auto_renew_months":"Auto-renew (mo)"}), hide_index=True, use_container_width=True)
+
+            # Controls: mark paid & renew
+            st.markdown("##### Actions")
+            sid_action = st.number_input("Subscription ID", min_value=1, step=1, key="sub_action_id")
+            c1,c2,c3 = st.columns([1,1,2])
+            with c1:
+                if st.button("Mark paid today", key="sub_mark_paid"):
+                    S = sheets["Subscriptions"]; idx = S.index[S["subscription_id"]==int(sid_action)]
+                    if len(idx)>0:
+                        S.loc[idx,"paid"] = True; S.loc[idx,"payment_date"] = pd.Timestamp.today(); sheets["Subscriptions"]=S; save_db(sheets); st.success("Marked paid.")
+                    else: st.error("ID not found.")
+            with c2:
+                if st.button("Create renewal", key="sub_renew"):
+                    S = sheets["Subscriptions"]; row = S.loc[S["subscription_id"]==int(sid_action)]
+                    if row.empty: st.error("ID not found.")
+                    else:
+                        r = row.iloc[0]
+                        months = int(r.get("auto_renew_months",0) or 0)
+                        if months<=0: st.warning("Auto-renew months is 0; set a value on the subscription first.")
+                        else:
+                            start = (pd.to_datetime(r["end_date"]) + pd.Timedelta(days=1)).normalize()
+                            try:
+                                # month arithmetic via pandas DateOffset
+                                end = start + pd.DateOffset(months=months) - pd.Timedelta(days=1)
+                            except Exception:
+                                end = start + pd.Timedelta(days=30*months) - pd.Timedelta(days=1)
+                            sid_new = next_id(S, "subscription_id")
+                            new = pd.DataFrame([{
+                                "subscription_id":sid_new,"user_id":int(r["user_id"]),"start_date":start,"end_date":end,
+                                "amount":float(r["amount"]),"discount_reason":r.get("discount_reason",None),"discount_pct":int(r.get("discount_pct",0)),
+                                "paid":False,"payment_date":pd.NaT,"auto_renew_months":months,"notes":f"Renewal of #{int(r['subscription_id'])}"
+                            }])
+                            sheets["Subscriptions"] = pd.concat([S,new], ignore_index=True); save_db(sheets); st.success(f"Created renewal #{sid_new}.")
+            # Export CSV
+            st.download_button("Download subscriptions (CSV)", data=Sdisp.to_csv(index=False).encode("utf-8"), file_name="subscriptions.csv", mime="text/csv")
         else:
             st.info("No subscriptions yet.")
 
@@ -623,17 +688,27 @@ with tabs[4]:
         days_to_expiry_new = st.number_input("Days before subscription expiry", min_value=1, value=days_to_expiry, step=1, key="notif_days_sub")
         hours_thresh_new = st.number_input("Hours remaining threshold for service", min_value=1.0, value=float(hours_thresh), step=1.0, key="notif_hours_serv")
         days_upcoming_new = st.number_input("Days ahead to check for scheduled maintenance", min_value=1, value=days_upcoming_maint, step=1, key="notif_days_maint")
+        email_members_toggle = st.checkbox("Also email members whose subscriptions are expiring", value=bool(str(get_setting(sheets, "notify_members_on_subscription_expiry", "false")).lower() in ("1","true","yes","on")), key="notif_email_members")
         if st.button("Save thresholds", key="notif_save"):
             S = sheets.get("Settings", pd.DataFrame(columns=["key","value"]))
-            def upsert(k,v):
-                nonlocal S
-                if S.empty or not (S["key"]==k).any():
-                    S = pd.concat([S, pd.DataFrame([[k,str(v)]], columns=["key","value"])], ignore_index=True)
-                else:
-                    S.loc[S["key"]==k,"value"]=str(v)
-            upsert("notify_days_before_subscription_expiry", days_to_expiry_new)
-            upsert("notify_hours_before_service", hours_thresh_new)
-            upsert("notify_days_maintenance_window", days_upcoming_new)
+            # inline upserts (no nonlocal)
+            if S.empty or not (S["key"]=="notify_days_before_subscription_expiry").any():
+                S = pd.concat([S, pd.DataFrame([["notify_days_before_subscription_expiry", str(days_to_expiry_new)]], columns=["key","value"])], ignore_index=True)
+            else:
+                S.loc[S["key"]=="notify_days_before_subscription_expiry","value"] = str(days_to_expiry_new)
+            if S.empty or not (S["key"]=="notify_hours_before_service").any():
+                S = pd.concat([S, pd.DataFrame([["notify_hours_before_service", str(hours_thresh_new)]], columns=["key","value"])], ignore_index=True)
+            else:
+                S.loc[S["key"]=="notify_hours_before_service","value"] = str(hours_thresh_new)
+            if S.empty or not (S["key"]=="notify_days_maintenance_window").any():
+                S = pd.concat([S, pd.DataFrame([["notify_days_maintenance_window", str(days_upcoming_new)]], columns=["key","value"])], ignore_index=True)
+            else:
+                S.loc[S["key"]=="notify_days_maintenance_window","value"] = str(days_upcoming_new)
+                        # upsert member email flag
+            if S.empty or not (S["key"]=="notify_members_on_subscription_expiry").any():
+                S = pd.concat([S, pd.DataFrame([["notify_members_on_subscription_expiry", str(email_members_toggle)]], columns=["key","value"])], ignore_index=True)
+            else:
+                S.loc[S["key"]=="notify_members_on_subscription_expiry","value"] = str(email_members_toggle)
             sheets["Settings"]=S; save_db(sheets); st.success("Saved.")
 
         st.markdown("---")
@@ -674,16 +749,32 @@ with tabs[4]:
             else:
                 subject = "Men's Shed — Notifications summary"
                 body = "\n".join(f"- {m}" for m in msgs)
+                sent="none"
                 if admin_email:
                     ok, info = send_email(subject, body, admin_email)
-                    if ok: st.success("Email sent."); sent="sent"
+                    if ok: st.success("Email sent to admin."); sent="sent-admin"
                     else:
-                        st.warning(f"Could not send email ({info}). I'll create a mailto link below.")
+                        st.warning(f"Could not send admin email ({info}). I'll create a mailto link below.")
                         st.markdown(f"[Open email draft]({'mailto:'+ (admin_email or '') +'?subject='+subject.replace(' ','%20')+'&body='+body.replace(' ','%20')})")
-                        sent="mailto"
+                        sent="mailto-admin"
                 else:
                     st.warning("Admin email not found. Please set an admin with a valid email.")
-                    sent="no_admin"
+                    sent="no-admin"
+
+                # Optionally email members with expiring subs
+                if get_setting_bool(sheets, "notify_members_on_subscription_expiry", False):
+                    try:
+                        S = sheets["Subscriptions"].copy(); U = sheets["Users"].set_index("user_id")
+                        S["end_date"] = pd.to_datetime(S["end_date"], errors="coerce")
+                        soon = S[S["end_date"].between(pd.Timestamp.today().normalize(), pd.Timestamp.today().normalize()+pd.Timedelta(days=days_to_expiry_new)) | (S["end_date"]<pd.Timestamp.today().normalize())]
+                        for _, r in soon.iterrows():
+                            email = U.loc[r["user_id"], "email"] if r["user_id"] in U.index else None
+                            if email:
+                                subj = "Your membership subscription is expiring"
+                                msg = f"Hello {U.loc[r['user_id'],'name']},\n\nYour membership subscription ends on {r['end_date'].date()}. Please renew.\n\nThanks,\nWoodturners of the Hunter"
+                                send_email(subj, msg, email)
+                    except Exception as e:
+                        st.warning(f"Member emails could not be sent ({e}).")
 
                 NL = sheets.get("NotificationsLog", pd.DataFrame(columns=["timestamp","messages","status"]))
                 NL = pd.concat([NL, pd.DataFrame([[pd.Timestamp.now(), "\n".join(msgs), sent]], columns=["timestamp","messages","status"])], ignore_index=True)
@@ -705,6 +796,11 @@ with tabs[4]:
                 S = pd.concat([S, pd.DataFrame([["show_contact_on_bookings", str(toggle)]], columns=["key","value"])], ignore_index=True)
             else:
                 S.loc[S["key"]=="show_contact_on_bookings","value"]=str(toggle)
+                        # upsert member email flag
+            if S.empty or not (S["key"]=="notify_members_on_subscription_expiry").any():
+                S = pd.concat([S, pd.DataFrame([["notify_members_on_subscription_expiry", str(email_members_toggle)]], columns=["key","value"])], ignore_index=True)
+            else:
+                S.loc[S["key"]=="notify_members_on_subscription_expiry","value"] = str(email_members_toggle)
             sheets["Settings"]=S; save_db(sheets); st.success("Saved.")
 
         st.markdown("### Operating hours")
