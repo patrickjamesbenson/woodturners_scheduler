@@ -5,6 +5,9 @@ from datetime import datetime, timedelta, date, time
 import datetime as dt
 from pathlib import Path
 import smtplib, ssl
+import json
+import json
+import json
 from email.message import EmailMessage
 
 st.set_page_config(page_title="Men's Shed Scheduler", page_icon="🪚", layout="wide")
@@ -62,7 +65,63 @@ _inject_css()
 _brand_header()
 
 # --------- DB helpers ---------
-def load_db():
+def build_newsletter_data_dict(sheets):
+    U = sheets["Users"].copy()
+    if "newsletter_opt_in" not in U.columns: U["newsletter_opt_in"] = True
+    members = []
+    for _, r in U.iterrows():
+        if bool(r.get("newsletter_opt_in", True)) and str(r.get("email","")).strip():
+            name = str(r["name"]); parts = name.split()
+            first = parts[0] if parts else name
+            last_initial = (parts[-1][0] if len(parts)>1 else "")
+            suburb = ""
+            addr = str(r.get("address",""))
+            if "," in addr: suburb = addr.split(",")[-1].strip()
+            members.append({
+                "user_id": int(r["user_id"]),
+                "first_name": first,
+                "last_name": (parts[-1] if len(parts)>1 else ""),
+                "opted_in": True,
+                "last_initial": f"{last_initial}." if last_initial else "",
+                "email": r.get("email",""),
+                "birth_date": str(pd.to_datetime(r.get("birth_date"), errors="coerce").date()) if pd.notna(r.get("birth_date")) else None,
+                "joined_date": str(pd.to_datetime(r.get("joined_date"), errors="coerce").date()) if "joined_date" in U.columns and pd.notna(r.get("joined_date")) else None,
+                "suburb": suburb
+            })
+    SE = sheets.get("UserEvents", pd.DataFrame())
+    events = [] if SE.empty else [{
+        "member_email": (sheets["Users"].loc[sheets["Users"]["user_id"]==int(r.get("user_id",0)),"email"].values[0] if int(r.get("user_id",0)) in sheets["Users"]["user_id"].values else ""),
+        "date": str(pd.to_datetime(r.get("event_date"), errors="coerce").date()) if pd.notna(r.get("event_date")) else None,
+        "type": ("competition" if "competition" in str(r.get("event_name","")).lower() else ("award" if "award" in str(r.get("event_name","")).lower() else "other")),
+        "title": str(r.get("event_name","")),
+        "detail": str(r.get("notes",""))
+    } for _, r in SE.iterrows()]
+    CU = sheets.get("ClubUpdates", pd.DataFrame()); club_updates = [] if CU.empty else CU.to_dict(orient="records")
+    NO = sheets.get("Notices", pd.DataFrame()); notices = [] if NO.empty else NO.to_dict(orient="records")
+    SP = sheets.get("SpotlightSubmissions", pd.DataFrame()); spotlight = [] if SP.empty else SP.to_dict(orient="records")
+    PR = sheets.get("ProjectSubmissions", pd.DataFrame()); projects = [] if PR.empty else PR.to_dict(orient="records")
+    UL = sheets.get("UserLicences", pd.DataFrame()); L = sheets.get("Licences", pd.DataFrame())
+    mentors = []
+    if not UL.empty and not U.empty and "role" in U.columns:
+        sup_ids = set(U[U["role"].str.lower()=="superuser"]["user_id"].tolist())
+        for uid in sup_ids:
+            lids = UL[UL["user_id"]==uid]["licence_id"].astype(int).tolist()
+            mentor_lics = [L.loc[L["licence_id"]==lid, "licence_name"].values[0] for lid in lids if lid in L["licence_id"].values]
+            ur = U.loc[U["user_id"]==uid].iloc[0]
+            mentors.append({"user_id": int(uid), "name": ur["name"], "email": ur.get("email",""), "licences": mentor_lics})
+    MR = sheets.get("AssistanceRequests", pd.DataFrame())
+    requests = []
+    if not MR.empty:
+        MR["created"] = pd.to_datetime(MR.get("created"), errors="coerce")
+        cut = pd.Timestamp.today() - pd.Timedelta(days=30)
+        recent = MR[MR["created"]>=cut] if "created" in MR.columns else MR
+        for _, r in recent.iterrows():
+            requests.append({"request_id": int(r.get("request_id",0)), "requester_user_id": int(r.get("requester_user_id",0)), "licence_id": int(r.get("licence_id",0)) if pd.notna(r.get("licence_id")) else None, "message": str(r.get("message","")), "created": str(r.get("created"))})
+    MI = sheets.get("MeetingInfo", pd.DataFrame()); meeting_info = {} if MI.empty else MI.iloc[-1].to_dict()
+    app_url = get_setting(sheets, "app_public_url", "")
+    links = {"upload_link": get_setting(sheets, "link_upload", ""), "mentorship_link": get_setting(sheets, "link_mentorship", ""), "join_link": get_setting(sheets, "link_join", ""), "rsvp_link": get_setting(sheets, "link_rsvp", ""), "unsubscribe_link": (app_url + "?unsubscribe=1&uid={{user_id}}") if app_url else "{{unsubscribe_link}}"}
+    last_issue_date = str(get_setting(sheets, "last_issue_date", "")) or pd.Timestamp.today().normalize().strftime("%Y-%m-01")
+    return {"members": members, "significant_events": events, "club_updates": club_updates, "notices": notices, "spotlight_submissions": spotlight, "project_submissions": projects, "mentors_offering": mentors, "mentorship_requests": requests, "meeting_info": meeting_info, "links": links, "last_issue_date": last_issue_date}\n\ndef load_db():
     import openpyxl  # noqa: F401
     if not DB_PATH.exists():
         st.error("Database missing (data/db.xlsx)."); st.stop()
@@ -72,7 +131,8 @@ def load_db():
         "Users","Licences","UserLicences","Machines","Bookings","OperatingLog",
         "Issues","ServiceLog","OperatingHours","ClosedDates","Settings",
         "AssistanceRequests","MaintenanceRequests",
-        "Subscriptions","DiscountReasons","NotificationsLog","UserEvents","Newsletters"
+        "Subscriptions","DiscountReasons","NotificationsLog","UserEvents","Newsletters",
+        "ProjectSubmissions","SpotlightSubmissions","ClubUpdates","Notices","MeetingInfo","Templates"
     ]
     for n in needed: sheets.setdefault(n, pd.DataFrame())
     U = sheets["Users"]
@@ -80,6 +140,7 @@ def load_db():
         if c not in U.columns: U[c] = "" if c != "role" else "user"
     if "birth_date" not in U.columns: U["birth_date"] = pd.NaT
     if "newsletter_opt_in" not in U.columns: U["newsletter_opt_in"] = True
+    if "joined_date" not in U.columns: U["joined_date"] = pd.NaT
     sheets["Users"] = U
     B = sheets["Bookings"]
     if "category" not in B.columns and not B.empty: B["category"] = "Usage"
@@ -105,6 +166,28 @@ def next_id(df, id_col):
     return int(pd.to_numeric(df[id_col], errors="coerce").fillna(0).max()) + 1
 
 def get_setting(sheets, key, default=None):
+    """Get a setting value from Settings sheet."""
+    
+def get_template(sheets, key, default_text=""):
+    T = sheets.get("Templates", pd.DataFrame(columns=["key","text"]))
+    if T.empty or "key" not in T.columns:
+        return default_text
+    m = T[T["key"]==key]
+    if m.empty:
+        return default_text
+    return str(m.iloc[0]["text"])
+
+def save_template(sheets, key, text):
+    T = sheets.get("Templates", pd.DataFrame(columns=["key","text"]))
+    if T.empty or "key" not in T.columns:
+        T = pd.DataFrame([{"key":key, "text":text}])
+    else:
+        if (T["key"]==key).any():
+            T.loc[T["key"]==key,"text"] = text
+        else:
+            T = pd.concat([T, pd.DataFrame([{"key":key, "text":text}])], ignore_index=True)
+    sheets["Templates"]=T; save_db(sheets)
+
     S = sheets.get("Settings", pd.DataFrame())
     if S.empty or "key" not in S.columns: return default
     m = S[S["key"]==key]
@@ -310,7 +393,7 @@ handle_unsubscribe_qp(sheets)
 sign_in_bar(sheets)
 me = current_user(sheets)
 
-tabs = st.tabs(["Book a Machine","Calendar","Assistance","Issues & Maintenance","Admin"])
+tabs = st.tabs(["Book a Machine","Calendar","My Profile","Assistance","Issues & Maintenance","Admin"])
 
 # ==== Book ====
 with tabs[0]:
@@ -378,8 +461,67 @@ with tabs[1]:
             day_b["Email"] = day_b["user_id"].map(lambda x: Utab.loc[x,"email"] if x in Utab.index else "")
         st.dataframe(day_b[["User","start","end","status","category"] + (["Phone","Email"] if show_contacts else [])].rename(columns={"start":"Start","end":"End","status":"Status"}), hide_index=True, use_container_width=True)
 
+
+# ==== My Profile ====
+with tabs[4]:
+    st.subheader("My Profile")
+    if me is None:
+        st.info("Please sign in to view and update your profile.")
+    else:
+        U = sheets["Users"]; row = U.loc[U["user_id"]==int(me["user_id"])].iloc[0]
+        st.markdown(f"**Name:** {row['name']}  ")
+        st.markdown(f"**Phone:** {row.get('phone','')}  ")
+        st.markdown(f"**Email:** {row.get('email','')}  ")
+        st.markdown(f"**Address:** {row.get('address','')}  ")
+        st.markdown(f"**Birth date:** {str(row.get('birth_date',''))}")
+        st.divider()
+        st.markdown("### Newsletter subscription")
+        flag = bool(row.get("newsletter_opt_in", True))
+        new_flag = st.checkbox("Subscribed to newsletter", value=flag, key="prof_news")
+        if st.button("Save subscription", key="prof_news_save"):
+            U2 = sheets["Users"]; idx = U2.index[U2["user_id"]==int(me["user_id"])]
+            U2.loc[idx, "newsletter_opt_in"] = bool(new_flag)
+            sheets["Users"] = U2; save_db(sheets); st.success("Saved.")
+        st.divider()
+        st.markdown("### Add a significant event")
+        ev_name = st.text_input("Event name", key="prof_ev_name")
+        ev_date = st.date_input("Event date", key="prof_ev_date")
+        ev_notes = st.text_input("Notes", key="prof_ev_notes")
+        if st.button("Add event", key="prof_ev_add"):
+            UE = sheets.get("UserEvents", pd.DataFrame(columns=["event_id","user_id","event_name","event_date","notes"]))
+            eid = int(pd.to_numeric(UE.get("event_id"), errors="coerce").fillna(0).max()) + 1 if not UE.empty else 1
+            new = pd.DataFrame([[eid, int(me['user_id']), ev_name.strip(), pd.Timestamp(ev_date), ev_notes.strip()]], columns=["event_id","user_id","event_name","event_date","notes"])
+            sheets["UserEvents"] = pd.concat([UE,new], ignore_index=True); save_db(sheets); st.success("Event added.")
+        st.divider()
+        st.markdown("### Share a project (photo)")
+        title = st.text_input("Project title", key="prof_prj_title")
+        desc = st.text_area("Short description", key="prof_prj_desc")
+        up = st.file_uploader("Upload image", type=["jpg","jpeg","png"], key="prof_prj_img")
+        if st.button("Submit project", key="prof_prj_submit"):
+            if up is None:
+                st.error("Please upload an image.")
+            else:
+                up_dir = BASE_DIR / "assets" / "uploads"; up_dir.mkdir(parents=True, exist_ok=True)
+                fname = f"project_{int(me['user_id'])}_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.{up.name.split('.')[-1].lower()}"
+                (up_dir / fname).write_bytes(up.read())
+                PS = sheets.get("ProjectSubmissions", pd.DataFrame(columns=["submission_id","user_id","title","description","image_file","date"]))
+                sid = int(pd.to_numeric(PS.get("submission_id"), errors="coerce").fillna(0).max()) + 1 if not PS.empty else 1
+                new = pd.DataFrame([[sid, int(me['user_id']), title.strip(), desc.strip(), fname, pd.Timestamp.now()]], columns=["submission_id","user_id","title","description","image_file","date"])
+                sheets["ProjectSubmissions"] = pd.concat([PS,new], ignore_index=True); save_db(sheets); st.success("Project submitted.")
+        st.markdown("#### Your submissions")
+        PS = sheets.get("ProjectSubmissions", pd.DataFrame())
+        if not PS.empty:
+            mine = PS[PS["user_id"]==int(me["user_id"])].copy()
+            if not mine.empty:
+                st.dataframe(mine[["submission_id","title","description","date","image_file"]].rename(columns={"submission_id":"ID"}), hide_index=True, use_container_width=True)
+            else:
+                st.info("No submissions yet.")
+        else:
+            st.info("No submissions yet.")
+
 # ==== Assistance ====
-with tabs[2]:
+
+with tabs[3]:
     st.subheader("Ask for assistance / mentorship")
     if me is None: st.info("Please sign in to request assistance."); st.stop()
     L = sheets["Licences"].sort_values("licence_name")
@@ -432,7 +574,7 @@ with tabs[3]:
             sheets["MaintenanceRequests"] = pd.concat([MR,new], ignore_index=True); save_db(sheets); st.success("Request sent.")
 
 # ==== Admin ====
-with tabs[4]:
+with tabs[5]:
     st.subheader("Admin")
     if not require_role("admin"):
         st.info("Admin access only. Sign in as an admin to continue."); st.stop()
@@ -752,39 +894,185 @@ with tabs[4]:
 
     # Newsletter
     with at[5]:
-        st.markdown("### Send a newsletter (PDF attachment)")
-        # App public URL for unsubscribe link
+        st.markdown("### Monthly Newsletter (prompt, dataset, email)")
+        c1,c2,c3 = st.columns([1,1,1])
+        with c1:
+            editor_name = st.text_input("Editor name", value=str(get_setting(sheets, "newsletter_editor_name", "John Benson")), key="news_editor_name")
+        with c2:
+            editor_email = st.text_input("Editor email", value=str(get_setting(sheets, "newsletter_editor_email", "")), key="news_editor_email")
+        with c3:
+            issue_day = int(get_setting(sheets, "newsletter_issue_day", 1) or 1)
+            issue_day_new = st.number_input("Issue day of month (1–28)", min_value=1, max_value=28, value=issue_day, step=1, key="news_issue_day")
+
         app_url = get_setting(sheets, "app_public_url", "")
         app_url_new = st.text_input("App public URL (for unsubscribe links)", value=str(app_url or ""), key="news_app_url")
-        if st.button("Save app URL", key="news_save_url"):
+
+        
+        st.markdown("##### Tokens & links")
+        org_name = st.text_input("Organisation name (for prompt token 🔧ORG_NAME)", value=str(get_setting(sheets, "org_name", "Woodturners of the Hunter")), key="news_org")
+        website_url = st.text_input("Website URL", value=str(get_setting(sheets, "website_url", "")), key="news_website")
+        postal_address = st.text_input("Postal address (for footer)", value=str(get_setting(sheets, "postal_address", "")), key="news_address")
+        logo_url = st.text_input("Logo URL (public)", value=str(get_setting(sheets, "logo_url", "")), key="news_logo")
+        approve_url = st.text_input("Approve URL (editor action)", value=str(get_setting(sheets, "approve_url", "")), key="news_approve")
+        edit_url = st.text_input("Edit URL (editor action)", value=str(get_setting(sheets, "edit_url", "")), key="news_edit")
+        market_stall_eoi_link = st.text_input("Market stall EOI link", value=str(get_setting(sheets, "market_stall_eoi_link", "")), key="news_eoi")
+
+        cL1,cL2 = st.columns(2)
+        with cL1:
+            upload_link = st.text_input("Upload photos link ({{upload_link}})", value=str(get_setting(sheets, "link_upload", "")), key="news_link_upload")
+            mentorship_link = st.text_input("Mentorship link ({{mentorship_link}})", value=str(get_setting(sheets, "link_mentorship", "")), key="news_link_mentorship")
+        with cL2:
+            join_link = st.text_input("Join link ({{join_link}})", value=str(get_setting(sheets, "link_join", "")), key="news_link_join")
+            rsvp_link = st.text_input("RSVP link ({{rsvp_link}})", value=str(get_setting(sheets, "link_rsvp", "")), key="news_link_rsvp")
+    
+        if st.button("Save newsletter settings", key="news_save_all"):
             S = sheets.get("Settings", pd.DataFrame(columns=["key","value"]))
-            if S.empty or not (S["key"]=="app_public_url").any():
-                S = pd.concat([S, pd.DataFrame([["app_public_url", str(app_url_new)]], columns=["key","value"])], ignore_index=True)
-            else:
-                S.loc[S["key"]=="app_public_url","value"] = str(app_url_new)
+            # inline upserts
+            def upsert(S, k, v):
+                if S.empty or not (S["key"]==k).any():
+                    return pd.concat([S, pd.DataFrame([[k,str(v)]], columns=["key","value"])], ignore_index=True)
+                else:
+                    S.loc[S["key"]==k,"value"]=str(v); return S
+            S = upsert(S, "newsletter_editor_name", editor_name)
+            S = upsert(S, "newsletter_editor_email", editor_email)
+            S = upsert(S, "newsletter_issue_day", issue_day_new)
+            S = upsert(S, "app_public_url", app_url_new)
+            S = upsert(S, "org_name", org_name)
+            S = upsert(S, "website_url", website_url)
+            S = upsert(S, "postal_address", postal_address)
+            S = upsert(S, "logo_url", logo_url)
+            S = upsert(S, "approve_url", approve_url)
+            S = upsert(S, "edit_url", edit_url)
+            S = upsert(S, "market_stall_eoi_link", market_stall_eoi_link)
+            S = upsert(S, "link_upload", upload_link)
+            S = upsert(S, "link_mentorship", mentorship_link)
+            S = upsert(S, "link_join", join_link)
+            S = upsert(S, "link_rsvp", rsvp_link)
             sheets["Settings"]=S; save_db(sheets); st.success("Saved.")
 
+        st.markdown("---")
+        st.markdown("#### Prompt template (editable)")
+        default_prompt = """YOU ARE: An experienced community newsletter editor for an Australian woodturning club called “🔧ORG_NAME”. Use a friendly Aussie voice and UK English. Output is for EMAIL only (no PDFs).
+
+GOAL: Produce THREE distinct, editable newsletter drafts for this month. Each draft must include:
+1) Subject + preheader (email-ready)
+2) “About Us” mission banner at the very top reading (allow minor edits):
+   Not-for-profit community club. We support the Hunter through mentorship, friendship and shared craft.
+3) Short hero intro (2–3 sentences)
+4) What’s On — events grouped and titled in this order:
+   A) Hunter & Newcastle
+   B) NSW (outside Hunter)
+   C) Australia-wide (other states/territories)
+   Each event: name, dates, city/state, 1–2 sentence “why it matters”, and a source link with citation.
+5) Markets & Field Days — Australia-wide search (with the same Hunter → NSW → Australia-wide grouping)
+   For each listing, include (when available):
+   • Visitor info: dates, hours, city/state, entry fee, parking/accessibility.
+   • Stallholder notes: apply/register link, application deadline, indicative fees, public liability insurance requirement, power availability, contact.
+   If something is unknown, write “TBC on site”.
+   Add a 3–5 bullet “Stallholder Tips” mini-box.
+6) Tips & Techniques — one practical tip + one safety nugget.
+7) Member Spotlight — if supplied in DATA; else a friendly prompt to submit for next issue.
+8) Happy Birthdays & Milestones — from DATA (see Database Rules).
+9) Welcome New Members — show recent joiners with a warm welcome.
+10) Workbench – What Members Are Working On — use project_submissions; else invite uploads for next issue via {{upload_link}}.
+11) Mentorship Corner — list mentors_offering; else CTA to sign up via {{mentorship_link}} (highlight youth mentoring & machine training).
+12) Buy/Sell/Swap & Notices — from DATA if present.
+13) Closing CTA — next meeting RSVP / socials.
+14) Provide FOUR artefacts per draft:
+    A) HTML email copy (semantic headings, lists, links; no external CSS)
+    B) Markdown edit version (same content, easy to tweak)
+    C) Plain-text fallback (line breaks only)
+    D) TemplatePreview_HTML — a full, 600px-wide, single-column, table-based email using minimal inline CSS that visually matches how it will be sent.
+
+BRAND & TEMPLATE:
+- Logo: use {{logo_url}} with alt text “Woodturners of the Hunter logo”.
+- Palette suggestions: charcoal background #1c2629, warm ochre #c56a2c accents, cream text #efe5cf.
+- Voice: welcoming, practical, community-first.
+
+TEMPLATEPREVIEW_HTML REQUIREMENTS (apply to each draft’s preview):
+- Table-based, 600px-wide, single column, centred.
+- Header: centred logo ({{logo_url}}).
+- Mission banner strip directly under header with the mission text above.
+- Content area for all sections (use clear H2/H3 headings and bullet lists).
+- Top-right of the content area: two small action buttons/links:
+    Approve Draft → {{approve_url}}
+    Edit Draft → {{edit_url}}
+- Footer: club address ({{postal_address}}), website ({{website_url}}), and “Unsubscribe: {{unsubscribe_link}}”.
+- Keep inline CSS minimal (e.g., font-family, widths, padding, colours). No external stylesheets.
+
+DATABASE RULES:
+- Only include members where opted_in == true.
+- Birthdays: include members with birth_date month == THIS_MONTH; group by week.
+- Milestones: include significant_events with date in [first day THIS_MONTH, last day NEXT_MONTH]; add a warm, tailored one-liner referencing the type & detail (e.g., award, anniversary, competition, teaching, birth, wedding, graduation, condolence, get_well, other).
+- New Members: joined_date within the last 30 days OR joined_date >= last_issue_date (if provided). Show first name + initial and suburb if available. Add a welcome line + links to {{join_link}} and {{mentorship_link}}.
+
+EVENT & RESOURCE SEARCH (USE BROWSER/WEB TOOL):
+- Search Australia-wide for woodturning/woodworking happenings in the next 6–8 weeks, but categorise results as:
+   A) Hunter & Newcastle
+   B) NSW (outside Hunter)
+   C) Australia-wide (other states/territories)
+- Include: club events, shows, field days, country/regional fairs, maker markets, artisan/craft markets (e.g., Springwood and similar).
+- Suggested keywords to bias: “woodturning demo”, “woodworking show”, “timber show”, “maker festival”, “men’s shed expo”, “field day”, “market day”, “artisan market”, “craft market”, suburb name + “market”.
+- For each item: include dates, city/state, why it’s relevant, plus a source link with a proper citation.
+- If listings are thin, include notable AU/NZ online resources (technique videos, tool care, safety) with citations.
+
+VARIATION STRATEGY (make the three drafts meaningfully different):
+- Draft 1: Events-forward (bigger What’s On + Markets)
+- Draft 2: Skills-focus (expanded Tips & Techniques + safety)
+- Draft 3: People-focus (Spotlight + New Members + Mentorship emphasis)
+
+CONSTRAINTS:
+- Keep each draft about 450–700 words (not counting TemplatePreview_HTML).
+- Respect privacy: use first name + initial unless a full name appears in spotlight_submissions or notices.
+- Include an unsubscribe line: “Unsubscribe: {{unsubscribe_link}}”.
+- Use tokens: {{first_name}}, {{rsvp_link}}, {{upload_link}}, {{mentorship_link}}, {{join_link}}, {{market_stall_eoi_link}}, {{approve_url}}, {{edit_url}}, {{logo_url}}, {{postal_address}}, {{website_url}}.
+
+DELIVERABLES FOR EACH OF THE 3 DRAFTS:
+A) HTML email copy
+B) Markdown edit version
+C) Plain-text version
+D) TemplatePreview_HTML (full, table-based, inline CSS)
+E) Short social blurb (≤200 chars) + three hashtags (e.g., #woodturning #australia #huntervalley)
+
+CHECKLIST BEFORE YOU PRINT RESULTS:
+- ✅ Events grouped Hunter → NSW → Australia-wide with citations
+- ✅ Markets & Field Days includes visitor info + stallholder notes (or TBC) + Stallholder Tips
+- ✅ Birthdays & milestones, new members applied per rules
+- ✅ Workbench, Mentorship, Notices populated or show a friendly CTA
+- ✅ HTML + Markdown + Plain-text + TemplatePreview_HTML included
+- ✅ Friendly AU community tone throughout
+
+DATA (paste/replace this block each month)
+<<<DATA
+{DATA_JSON}
+>>>"""
+
+        tmpl = st.text_area("Newsletter prompt template", value=get_template(sheets, "newsletter_prompt", default_prompt), height=400, key="news_prompt")
+        if st.button("Save prompt", key="news_prompt_save"):
+            save_template(sheets, "newsletter_prompt", tmpl); st.success("Prompt saved.")
+
+        st.markdown("---")
+        st.markdown("#### Build dataset for this month")
+        data_dict = build_newsletter_data_dict(sheets)
+        data_json = json.dumps(data_dict, indent=2)
+        st.code(data_json, language="json")
+        st.download_button("Download DATA.json", data=data_json.encode("utf-8"), file_name="newsletter_data.json")
+
+        st.markdown("#### Compile prompt")
+        compiled = tmpl.replace("{DATA_JSON}", data_json).replace("🔧ORG_NAME", get_setting(sheets, "org_name", "Woodturners of the Hunter"))
+        st.download_button("Download compiled_prompt.txt", data=compiled.encode("utf-8"), file_name="compiled_prompt.txt")
+        st.text_area("Copy-paste prompt into ChatGPT", value=compiled, height=300)
+        st.info("Tip: Open ChatGPT in a new tab and paste the compiled prompt above. Pre-filling the chat via URL is not reliably supported.")
+
+        st.markdown("---")
+        st.markdown("#### Send PDF newsletter (optional)")
         up = st.file_uploader("Upload newsletter PDF", type=["pdf"], key="news_pdf")
         title = st.text_input("Title/subject", key="news_title", value="Woodturners Newsletter")
-        body = st.text_area("Intro message (appears in email body)", height=120, key="news_body", value="Please find this month’s newsletter attached.")
+        body = st.text_area("Intro message", height=120, key="news_body", value="Please find this month’s newsletter attached.")
         U = sheets["Users"].copy()
         if "newsletter_opt_in" not in U.columns: U["newsletter_opt_in"] = True
         subs = U[U["newsletter_opt_in"]==True].copy()
-        st.caption(f"Subscribers: {len(subs)} / {len(U)} total members")
-        st.dataframe(subs[["user_id","name","email","newsletter_opt_in"]].rename(columns={"newsletter_opt_in":"Subscribed"}), hide_index=True, use_container_width=True)
-
-        # Per-user unsubscribe toggle
-        st.markdown("#### Manage subscriptions")
-        uname_sub = st.selectbox("Member", U["name"].tolist(), key="news_member")
-        current = bool(U.loc[U["name"]==uname_sub,"newsletter_opt_in"].iloc[0])
-        new_flag = st.checkbox("Subscribed", value=current, key="news_flag")
-        if st.button("Update subscription", key="news_update"):
-            U2 = sheets["Users"]; idx = U2.index[U2["name"]==uname_sub]
-            if len(idx)>0:
-                U2.loc[idx, "newsletter_opt_in"] = bool(new_flag)
-                sheets["Users"]=U2; save_db(sheets); st.success("Updated.")
-
-        # Save newsletter record and email
+        st.caption(f"Subscribers: {len(subs)} / {len(U)}")
         if st.button("Email newsletter now", key="news_send"):
             if up is None:
                 st.error("Please upload a PDF first.")
@@ -792,37 +1080,31 @@ with tabs[4]:
                 st.warning("No subscribed recipients.")
             else:
                 pdf_bytes = up.read()
-                # Save locally
-                news_dir = BASE_DIR / "assets" / "newsletters"
-                news_dir.mkdir(parents=True, exist_ok=True)
-                fname = f"newsletter_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.pdf"
-                (news_dir / fname).write_bytes(pdf_bytes)
-                # Record in sheet
+                news_dir = BASE_DIR / "assets" / "newsletters"; news_dir.mkdir(parents=True, exist_ok=True)
+                fname = f"newsletter_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.pdf"; (news_dir / fname).write_bytes(pdf_bytes)
                 NW = sheets.get("Newsletters", pd.DataFrame(columns=["newsletter_id","title","date","filename"]))
-                nid = int(NW["newsletter_id"].max()+1) if not NW.empty else 1
+                nid = int(pd.to_numeric(NW.get("newsletter_id"), errors="coerce").fillna(0).max()) + 1 if not NW.empty else 1
                 NW = pd.concat([NW, pd.DataFrame([[nid, title, pd.Timestamp.now(), fname]], columns=["newsletter_id","title","date","filename"])], ignore_index=True)
                 sheets["Newsletters"]=NW; save_db(sheets)
 
-                sent_count = 0; failed = 0
+                sent_count=0; failed=0
+                app_url = get_setting(sheets, "app_public_url", "")
                 for _, r in subs.iterrows():
-                    to = r["email"]; if not to: continue
-                    unsub = ""
-                    if app_url_new:
-                        unsub = f"\n\nTo unsubscribe, click: {app_url_new}?unsubscribe=1&uid={int(r['user_id'])}"
-                    else:
-                        admin_email = get_admin_email(sheets) or ""
-                        unsub = f"\n\nTo unsubscribe, reply to this email with subject: UNSUBSCRIBE"
-                    ok, info = send_email(title, body + unsub, to, attachment=(fname, pdf_bytes, "application/pdf"))
+                    to = r.get("email",""); 
+                    if not to: 
+                        continue
+                    unsub = (app_url + f"?unsubscribe=1&uid={int(r['user_id'])}") if app_url else ""
+                    msg = body + (f"\\n\\nUnsubscribe: {unsub}" if unsub else "")
+                    ok, info = send_email(title, msg, to, attachment=(fname, pdf_bytes, "application/pdf"))
                     if ok: sent_count += 1
                     else: failed += 1
-                st.success(f"Newsletter queued: sent={sent_count}, failed={failed}. See Notifications log for errors if any.")
+                st.success(f"Newsletter attempted: sent={sent_count}, failed={failed}.")
 
         st.markdown("#### Sent newsletters")
         NW = sheets.get("Newsletters", pd.DataFrame())
         if NW.empty: st.info("No newsletters sent yet.")
         else:
             st.dataframe(NW.rename(columns={"title":"Title","date":"Date","filename":"File"}), hide_index=True, use_container_width=True)
-
     # Notifications
     with at[6]:
         st.markdown("### Notification settings")
@@ -879,6 +1161,18 @@ with tabs[4]:
                 msgs.append(f"Service due soon for {row['machine_name']} — {left:.1f} hours remaining")
 
         # Scheduled maintenance in the next X days
+        # Newsletter reminder (7 days before issue day)
+        issue_day = int(get_setting(sheets, "newsletter_issue_day", 1) or 1)
+        editor_email = get_setting(sheets, "newsletter_editor_email", None) or get_admin_email(sheets)
+        today = pd.Timestamp.today().normalize()
+        try:
+            this_issue = pd.Timestamp(year=today.year, month=today.month, day=issue_day)
+        except Exception:
+            this_issue = pd.Timestamp(year=today.year, month=today.month, day=1)
+        next_issue = this_issue if this_issue >= today else (this_issue + pd.DateOffset(months=1))
+        if 0 <= (next_issue - today).days <= 7:
+            msgs.append(f"Newsletter due on {next_issue.date()} — remind editor at {editor_email}")
+
         B = sheets["Bookings"].copy()
         if not B.empty:
             B["start"] = pd.to_datetime(B["start"], errors="coerce")
