@@ -1,1 +1,8 @@
-.header{width:100%; background:#f6f7f8; display:flex; align-items:center; justify-content:center; padding:16px; border-bottom:1px solid rgba(0,0,0,.06);} .header img{max-width:min(980px,92vw); height:auto; display:block} .signin{position:sticky; top:0; background:#fff; padding:8px 0; border-bottom:1px solid rgba(0,0,0,.08); z-index:10}
+
+.header{width:100%; background:#f6f7f8; display:flex; align-items:center; justify-content:center; padding:16px; border-bottom:1px solid rgba(0,0,0,.06)}
+.header img{max-width:min(980px,92vw); height:auto; display:block}
+.signin{position:sticky; top:0; background:#fff; padding:8px 0; border-bottom:1px solid rgba(0,0,0,.08); z-index:10}
+.badge{display:inline-block; padding:.2rem .5rem; border-radius:999px; font-weight:600}
+.badge.ok{background:#E8F5E9; color:#1B5E20}
+.badge.warn{background:#FFF8E1; color:#9E6500}
+.badge.err{background:#FFEBEE; color:#B71C1C}
