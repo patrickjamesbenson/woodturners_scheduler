@@ -2,11 +2,44 @@
 import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta, date, time
+import datetime as dt
 from pathlib import Path
 import smtplib, ssl
 from email.message import EmailMessage
 
 st.set_page_config(page_title="Men's Shed Scheduler", page_icon="🪚", layout="wide")
+
+# Handle unsubscribe via query params (?unsubscribe=1&uid=##)
+def _get_query_params():
+    try:
+        # Streamlit 1.27+: st.query_params is Mapping-like
+        qp = st.query_params
+        return dict(qp)
+    except Exception:
+        try:
+            return st.experimental_get_query_params()
+        except Exception:
+            return {}
+
+def handle_unsubscribe_qp(sheets):
+    qp = _get_query_params()
+    if not qp: return
+    try:
+        unsub = qp.get("unsubscribe", ["0"])[0] if isinstance(qp.get("unsubscribe"), list) else qp.get("unsubscribe", "0")
+        uid = qp.get("uid", [""])[0] if isinstance(qp.get("uid"), list) else qp.get("uid", "")
+        if str(unsub) in ("1","true","yes") and str(uid).isdigit():
+            U = sheets["Users"]; uid_i = int(uid)
+            if uid_i in U["user_id"].values:
+                idx = U.index[U["user_id"]==uid_i]
+                U.loc[idx,"newsletter_opt_in"] = False
+                sheets["Users"] = U
+                with pd.ExcelWriter(DB_PATH, engine="openpyxl", mode="w") as w:
+                    for n, df in sheets.items():
+                        df.to_excel(w, sheet_name=n, index=False)
+                st.success("You have been unsubscribed from newsletters.")
+    except Exception as e:
+        st.warning(f"Unsubscribe failed: {e}")
+
 
 BASE_DIR = Path(__file__).parent
 DB_PATH = BASE_DIR / "data" / "db.xlsx"
@@ -39,12 +72,14 @@ def load_db():
         "Users","Licences","UserLicences","Machines","Bookings","OperatingLog",
         "Issues","ServiceLog","OperatingHours","ClosedDates","Settings",
         "AssistanceRequests","MaintenanceRequests",
-        "Subscriptions","DiscountReasons","NotificationsLog"
+        "Subscriptions","DiscountReasons","NotificationsLog","UserEvents","Newsletters"
     ]
     for n in needed: sheets.setdefault(n, pd.DataFrame())
     U = sheets["Users"]
     for c in ["phone","email","address","role","password"]:
         if c not in U.columns: U[c] = "" if c != "role" else "user"
+    if "birth_date" not in U.columns: U["birth_date"] = pd.NaT
+    if "newsletter_opt_in" not in U.columns: U["newsletter_opt_in"] = True
     sheets["Users"] = U
     B = sheets["Bookings"]
     if "category" not in B.columns and not B.empty: B["category"] = "Usage"
@@ -244,7 +279,7 @@ def get_admin_email(sheets):
     admins = U[U["role"].str.lower()=="admin"]
     return admins.iloc[0]["email"] if not admins.empty else None
 
-def send_email(subject, body, to_email):
+def send_email(subject, body, to_email, attachment=None):
     # Uses Streamlit Secrets for SMTP; otherwise returns False
     try:
         host = st.secrets["SMTP_HOST"]; port = int(st.secrets.get("SMTP_PORT", 587))
@@ -255,6 +290,11 @@ def send_email(subject, body, to_email):
         msg = EmailMessage()
         msg["Subject"] = subject; msg["From"] = from_addr; msg["To"] = to_email
         msg.set_content(body)
+        # attachment: tuple (filename, bytes, mime)
+        if attachment is not None:
+            fname, data, mime = attachment
+            maintype, subtype = mime.split("/",1)
+            msg.add_attachment(data, maintype=maintype, subtype=subtype, filename=fname)
         ctx = ssl.create_default_context()
         with smtplib.SMTP(host, port) as s:
             s.starttls(context=ctx)
@@ -266,6 +306,7 @@ def send_email(subject, body, to_email):
 
 # --------- Load DB & sign-in ---------
 sheets = load_db()
+handle_unsubscribe_qp(sheets)
 sign_in_bar(sheets)
 me = current_user(sheets)
 
@@ -395,7 +436,7 @@ with tabs[4]:
     st.subheader("Admin")
     if not require_role("admin"):
         st.info("Admin access only. Sign in as an admin to continue."); st.stop()
-    at = st.tabs(["Users & Licences","Machines","Schedule","Maintenance","Subscriptions & Discounts","Notifications","Data & Settings"])
+    at = st.tabs(["Users & Licences","Machines","Schedule","Maintenance","Subscriptions & Discounts","Newsletter","Notifications","Data & Settings"])
 
     # Users & Licences
     with at[0]:
@@ -405,10 +446,12 @@ with tabs[4]:
         email = st.text_input("Email", key="adm_new_email")
         addr = st.text_area("Address", key="adm_new_addr")
         role = st.selectbox("Role", ["user","superuser","admin"], key="adm_new_role")
+        birth = st.date_input("Birth date (optional)", key="adm_new_birth")
+        newsletter = st.checkbox("Subscribed to newsletter", value=True, key="adm_new_news")
         password = st.text_input("Set password (optional)", type="password", key="adm_new_pw")
         if st.button("Add user", key="adm_add_user"):
             U = sheets["Users"]; uid_new = next_id(U, "user_id")
-            row = {"user_id":uid_new,"name":name.strip(),"phone":phone.strip(),"email":email.strip(),"address":addr.strip(),"role":role,"password":password.strip()}
+            row = {"user_id":uid_new,"name":name.strip(),"phone":phone.strip(),"email":email.strip(),"address":addr.strip(),"role":role,"password":password.strip(),"birth_date":pd.Timestamp(birth) if birth else pd.NaT,"newsletter_opt_in":bool(newsletter)}
             sheets["Users"] = pd.concat([U, pd.DataFrame([row])], ignore_index=True); save_db(sheets); st.success(f"Added {name} (ID {uid_new}).")
 
         st.markdown("---")
@@ -421,12 +464,17 @@ with tabs[4]:
             uid_sel = u_map[uname]
             cur_role = str(U.loc[U["user_id"]==uid_sel,"role"].iloc[0] or "user")
             new_role = st.selectbox("Role", ["user","superuser","admin"], index=["user","superuser","admin"].index(cur_role), key="adm_set_role")
+            new_birth = st.date_input("Birth date", value=pd.to_datetime(U.loc[U["user_id"]==uid_sel,"birth_date"].iloc[0]) if pd.notna(U.loc[U["user_id"]==uid_sel,"birth_date"].iloc[0]) else dt.date(1970,1,1), key="adm_set_birth")
+            news_on = st.checkbox("Subscribed to newsletter", value=bool(U.loc[U["user_id"]==uid_sel,"newsletter_opt_in"].iloc[0]) if "newsletter_opt_in" in U.columns else True, key="adm_set_news")
             new_pw = st.text_input("New password (blank to keep)", type="password", key="adm_set_pw")
             if st.button("Save user settings", key="adm_save_role"):
                 U2 = sheets["Users"]; idx = U2.index[U2["user_id"]==uid_sel]
                 if len(idx)>0:
                     U2.loc[idx,"role"] = new_role
                     if new_pw.strip(): U2.loc[idx,"password"] = new_pw.strip()
+                    U2.loc[idx,"birth_date"] = pd.Timestamp(new_birth) if new_birth else pd.NaT
+                    if "newsletter_opt_in" not in U2.columns: U2["newsletter_opt_in"] = True
+                    U2.loc[idx,"newsletter_opt_in"] = bool(news_on)
                     sheets["Users"] = U2; save_db(sheets); st.success("Saved.")
 
         st.markdown("---")
@@ -446,8 +494,32 @@ with tabs[4]:
                 UL = pd.concat([UL, pd.DataFrame([{"user_id":uid2,"licence_id":lid,"start_date":pd.Timestamp(start_d),"end_date":pd.Timestamp(end_d) if end_d else pd.NaT}])], ignore_index=True)
             sheets["UserLicences"] = UL; save_db(sheets); st.success("Licence saved.")
 
+
+        st.markdown("---")
+        st.markdown("### Significant events")
+        if not U.empty:
+            uname_ev = st.selectbox("User for events", list(u_map.keys()), key="adm_ev_user")
+            uid_ev = u_map[uname_ev]
+            ev_name = st.text_input("Event name (e.g., Safety Induction, Mentor Award)", key="adm_ev_name")
+            ev_date = st.date_input("Event date", key="adm_ev_date")
+            ev_notes = st.text_input("Notes (optional)", key="adm_ev_notes")
+            if st.button("Add event", key="adm_ev_add"):
+                UE = sheets.get("UserEvents", pd.DataFrame(columns=["event_id","user_id","event_name","event_date","notes"]))
+                eid = int(UE["event_id"].max()+1) if not UE.empty else 1
+                new = pd.DataFrame([{"event_id":eid,"user_id":uid_ev,"event_name":ev_name.strip(),"event_date":pd.Timestamp(ev_date),"notes":ev_notes.strip()}])
+                sheets["UserEvents"] = pd.concat([UE, new], ignore_index=True); save_db(sheets); st.success("Event added.")
+            UE = sheets.get("UserEvents", pd.DataFrame())
+            if not UE.empty:
+                show = UE[UE["user_id"]==uid_ev].copy()
+                if show.empty: st.info("No events yet for this user.")
+                else:
+                    st.dataframe(show.rename(columns={"event_name":"Event","event_date":"Date"}), hide_index=True, use_container_width=True)
+        else:
+            st.info("No users yet.")
+
         st.markdown("#### Current users")
-        Udisp = sheets["Users"][["user_id","name","role","phone","email","address"]].rename(columns={"user_id":"ID","name":"Name","role":"Role"})
+        colsU = [c for c in ["user_id","name","role","phone","email","address","birth_date","newsletter_opt_in"] if c in sheets["Users"].columns]
+        Udisp = sheets["Users"][colsU].rename(columns={"user_id":"ID","name":"Name","role":"Role","birth_date":"Birth date","newsletter_opt_in":"Subscribed"})
         st.dataframe(Udisp, hide_index=True, use_container_width=True)
 
     # Machines
@@ -677,8 +749,82 @@ with tabs[4]:
         else:
             st.info("No subscriptions yet.")
 
-    # Notifications
+
+    # Newsletter
     with at[5]:
+        st.markdown("### Send a newsletter (PDF attachment)")
+        # App public URL for unsubscribe link
+        app_url = get_setting(sheets, "app_public_url", "")
+        app_url_new = st.text_input("App public URL (for unsubscribe links)", value=str(app_url or ""), key="news_app_url")
+        if st.button("Save app URL", key="news_save_url"):
+            S = sheets.get("Settings", pd.DataFrame(columns=["key","value"]))
+            if S.empty or not (S["key"]=="app_public_url").any():
+                S = pd.concat([S, pd.DataFrame([["app_public_url", str(app_url_new)]], columns=["key","value"])], ignore_index=True)
+            else:
+                S.loc[S["key"]=="app_public_url","value"] = str(app_url_new)
+            sheets["Settings"]=S; save_db(sheets); st.success("Saved.")
+
+        up = st.file_uploader("Upload newsletter PDF", type=["pdf"], key="news_pdf")
+        title = st.text_input("Title/subject", key="news_title", value="Woodturners Newsletter")
+        body = st.text_area("Intro message (appears in email body)", height=120, key="news_body", value="Please find this month’s newsletter attached.")
+        U = sheets["Users"].copy()
+        if "newsletter_opt_in" not in U.columns: U["newsletter_opt_in"] = True
+        subs = U[U["newsletter_opt_in"]==True].copy()
+        st.caption(f"Subscribers: {len(subs)} / {len(U)} total members")
+        st.dataframe(subs[["user_id","name","email","newsletter_opt_in"]].rename(columns={"newsletter_opt_in":"Subscribed"}), hide_index=True, use_container_width=True)
+
+        # Per-user unsubscribe toggle
+        st.markdown("#### Manage subscriptions")
+        uname_sub = st.selectbox("Member", U["name"].tolist(), key="news_member")
+        current = bool(U.loc[U["name"]==uname_sub,"newsletter_opt_in"].iloc[0])
+        new_flag = st.checkbox("Subscribed", value=current, key="news_flag")
+        if st.button("Update subscription", key="news_update"):
+            U2 = sheets["Users"]; idx = U2.index[U2["name"]==uname_sub]
+            if len(idx)>0:
+                U2.loc[idx, "newsletter_opt_in"] = bool(new_flag)
+                sheets["Users"]=U2; save_db(sheets); st.success("Updated.")
+
+        # Save newsletter record and email
+        if st.button("Email newsletter now", key="news_send"):
+            if up is None:
+                st.error("Please upload a PDF first.")
+            elif subs.empty:
+                st.warning("No subscribed recipients.")
+            else:
+                pdf_bytes = up.read()
+                # Save locally
+                news_dir = BASE_DIR / "assets" / "newsletters"
+                news_dir.mkdir(parents=True, exist_ok=True)
+                fname = f"newsletter_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+                (news_dir / fname).write_bytes(pdf_bytes)
+                # Record in sheet
+                NW = sheets.get("Newsletters", pd.DataFrame(columns=["newsletter_id","title","date","filename"]))
+                nid = int(NW["newsletter_id"].max()+1) if not NW.empty else 1
+                NW = pd.concat([NW, pd.DataFrame([[nid, title, pd.Timestamp.now(), fname]], columns=["newsletter_id","title","date","filename"])], ignore_index=True)
+                sheets["Newsletters"]=NW; save_db(sheets)
+
+                sent_count = 0; failed = 0
+                for _, r in subs.iterrows():
+                    to = r["email"]; if not to: continue
+                    unsub = ""
+                    if app_url_new:
+                        unsub = f"\n\nTo unsubscribe, click: {app_url_new}?unsubscribe=1&uid={int(r['user_id'])}"
+                    else:
+                        admin_email = get_admin_email(sheets) or ""
+                        unsub = f"\n\nTo unsubscribe, reply to this email with subject: UNSUBSCRIBE"
+                    ok, info = send_email(title, body + unsub, to, attachment=(fname, pdf_bytes, "application/pdf"))
+                    if ok: sent_count += 1
+                    else: failed += 1
+                st.success(f"Newsletter queued: sent={sent_count}, failed={failed}. See Notifications log for errors if any.")
+
+        st.markdown("#### Sent newsletters")
+        NW = sheets.get("Newsletters", pd.DataFrame())
+        if NW.empty: st.info("No newsletters sent yet.")
+        else:
+            st.dataframe(NW.rename(columns={"title":"Title","date":"Date","filename":"File"}), hide_index=True, use_container_width=True)
+
+    # Notifications
+    with at[6]:
         st.markdown("### Notification settings")
         admin_email = get_admin_email(sheets)
         st.write(f"Admin email: **{admin_email or '(not set!)'}**")
