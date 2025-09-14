@@ -25,7 +25,7 @@ def save_db(sheets: dict):
         load_db.clear()  # clears @st.cache_data so next run reloads the file
     except Exception:
         pass
-d
+
 def get_setting(s, key, default=""):
     S=s.get("Settings", pd.DataFrame(columns=["key","value"]))
     m=S[S["key"]==key]
