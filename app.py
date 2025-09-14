@@ -1,4 +1,3 @@
-
 import streamlit as st, pandas as pd
 from datetime import datetime, date, time, timedelta
 from pathlib import Path
@@ -16,11 +15,13 @@ def load_db():
     return {n: pd.read_excel(DB, engine="openpyxl", sheet_name=n) for n in xls.sheet_names}
 
 def save_db(sheets: dict):
+    # NOTE: Fixed DB_PATH -> DB to avoid crash when saving
     import pandas as _pd
-    with _pd.ExcelWriter(DB_PATH, engine="openpyxl", mode="w") as w:
+    with _pd.ExcelWriter(DB, engine="openpyxl", mode="w") as w:
         for name, df in sheets.items():
             if isinstance(df, _pd.DataFrame):
                 df.to_excel(w, sheet_name=name, index=False)
+    # Ensure subsequent run reloads the updated file
     try:
         load_db.clear()  # clears @st.cache_data so next run reloads the file
     except Exception:
@@ -90,18 +91,18 @@ labels=[f"{r.name} ({r.role})" for r in U.itertuples()]
 id_by_label={f"{r.name} ({r.role})": int(r.user_id) for r in U.itertuples()}
 
 st.sidebar.header("Sign in")
-label=st.sidebar.selectbox("Your name", [""]+labels, index=0)
+label=st.sidebar.selectbox("Your name", [""]+labels, index=0, key="sb_name")
 me=None
 if label:
     uid=id_by_label[label]
     row=U[U["user_id"]==uid].iloc[0]
     if row["role"] in ("admin","superuser") and str(row.get("password","")).strip():
-        pwd=st.sidebar.text_input("Password", type="password")
-        if st.sidebar.button("Sign in"):
+        pwd=st.sidebar.text_input("Password", type="password", key="sb_pwd")
+        if st.sidebar.button("Sign in", key="sb_signin"):
             if pwd==str(row["password"]): st.session_state["me_id"]=uid; st.sidebar.success("Signed in")
             else: st.sidebar.error("Wrong password")
     else:
-        if st.sidebar.button("Continue"): st.session_state["me_id"]=uid
+        if st.sidebar.button("Continue", key="sb_continue"): st.session_state["me_id"]=uid
 if "me_id" in st.session_state:
     me=U[U["user_id"]==st.session_state["me_id"]].iloc[0].to_dict()
     st.sidebar.info(f"Signed in as: {me['name']} ({me['role']})")
@@ -237,10 +238,14 @@ with tabs[0]:
 
 with tabs[1]:
     st.subheader("Calendar")
-    sel = st.selectbox("Machine", [f"{r.machine_id} - {r.machine_name}" for r in sheets["Machines"].itertuples()])
+    sel = st.selectbox(
+        "Machine",
+        [f"{r.machine_id} - {r.machine_name}" for r in sheets["Machines"].itertuples()],
+        key="cal_machine_sel",
+    )
     mid=int(sel.split(" - ")[0])
-    base_day = st.date_input("Day", value=date.today(), format=DFMT)
-    view = st.radio("View", ["Day","Week"], horizontal=True)
+    base_day = st.date_input("Day", value=date.today(), format=DFMT, key="cal_day")
+    view = st.radio("View", ["Day","Week"], horizontal=True, key="cal_view")
     if view=="Day":
         st.dataframe(day_bookings(sheets, mid, base_day)[["start","end","purpose","status"]], use_container_width=True, hide_index=True)
     else:
@@ -258,8 +263,8 @@ with tabs[2]:
     else:
         L=sheets["Licences"]
         lic_map={f"{r.licence_id} - {r.licence_name}": int(r.licence_id) for r in L.itertuples()}
-        sel = st.selectbox("Skill / Machine licence", list(lic_map.keys()))
-        msg = st.text_area("What do you need help with? (optional)")
+        sel = st.selectbox("Skill / Machine licence", list(lic_map.keys()), key="mentor_licence_sel")
+        msg = st.text_area("What do you need help with? (optional)", key="mentor_msg")
         UL=sheets.get("UserLicences", pd.DataFrame())
         U=sheets["Users"]
         today=pd.Timestamp.today().normalize()
@@ -272,7 +277,7 @@ with tabs[2]:
         else:
             st.markdown("**Suggested mentors:**")
             st.dataframe(mentors, hide_index=True, use_container_width=True)
-        if st.button("Submit mentoring request", type="primary"):
+        if st.button("Submit mentoring request", type="primary", key="mentor_submit"):
             AR = sheets.get("AssistanceRequests", pd.DataFrame(columns=["request_id","requester_user_id","licence_id","message","created","status","handled_by","handled_on","outcome","notes"]))
             req_id=1 if AR.empty else int(pd.to_numeric(AR["request_id"], errors="coerce").fillna(0).max())+1
             new=pd.DataFrame([[req_id, int(me["user_id"]), lic_id, msg, pd.Timestamp.today(), "open", None, None, None, None]], columns=AR.columns)
@@ -285,10 +290,14 @@ with tabs[2]:
 
 with tabs[3]:
     st.subheader("Issues & Maintenance")
-    msel = st.selectbox("Machine", [f"{r.machine_id} - {r.machine_name}" for r in sheets["Machines"].itertuples()])
+    msel = st.selectbox(
+        "Machine",
+        [f"{r.machine_id} - {r.machine_name}" for r in sheets["Machines"].itertuples()],
+        key="issues_machine_sel"
+    )
     mid = int(msel.split(" - ")[0])
-    text = st.text_area("Describe an issue")
-    if me and st.button("Submit issue"):
+    text = st.text_area("Describe an issue", key="issue_text")
+    if me and st.button("Submit issue", key="issue_submit"):
         I=sheets["Issues"]; iid=int(pd.to_numeric(I["issue_id"], errors="coerce").fillna(0).max())+1 if not I.empty else 1
         new=pd.DataFrame([[iid, mid, int(me["user_id"]), pd.Timestamp.today(), "open", text]], columns=I.columns)
         sheets["Issues"]=pd.concat([I,new], ignore_index=True); save_db(sheets); st.success("Issue logged."); st.rerun()
@@ -308,10 +317,10 @@ with tabs[4]:
         with at[2]:
             st.markdown("### User licencing")
             U=sheets["Users"]; L=sheets["Licences"]; UL=sheets["UserLicences"].copy()
-            ulabel=st.selectbox("Member", [f"{r.user_id} - {r.name}" for r in U.itertuples()])
-            llabel=st.selectbox("Licence", [f"{r.licence_id} - {r.licence_name}" for r in L.itertuples()])
-            vf=st.date_input("Valid from", format=DFMT); vt=st.date_input("Valid to", format=DFMT)
-            if st.button("Grant licence"):
+            ulabel=st.selectbox("Member", [f"{r.user_id} - {r.name}" for r in U.itertuples()], key="ul_member")
+            llabel=st.selectbox("Licence", [f"{r.licence_id} - {r.licence_name}" for r in L.itertuples()], key="ul_licence")
+            vf=st.date_input("Valid from", format=DFMT, key="ul_valid_from"); vt=st.date_input("Valid to", format=DFMT, key="ul_valid_to")
+            if st.button("Grant licence", key="ul_grant"):
                 uid=int(ulabel.split(" - ")[0]); lid=int(llabel.split(" - ")[0])
                 new=pd.DataFrame([[uid,lid,pd.Timestamp(vf),pd.Timestamp(vt)]], columns=UL.columns)
                 sheets["UserLicences"]=pd.concat([UL,new], ignore_index=True); save_db(sheets); st.success("Licence granted."); st.rerun()
@@ -326,14 +335,14 @@ with tabs[4]:
             if open_reqs.empty: st.info("No open requests.")
             else:
                 st.dataframe(open_reqs.merge(U[["user_id","name","email"]], left_on="requester_user_id", right_on="user_id"), use_container_width=True, hide_index=True)
-                sel = st.selectbox("Select request id", open_reqs["request_id"].tolist())
+                sel = st.selectbox("Select request id", open_reqs["request_id"].tolist(), key="comp_req_id")
                 req = open_reqs[open_reqs["request_id"]==sel].iloc[0]
                 st.write(f"**Member:** {U.loc[U['user_id']==req.requester_user_id,'name'].iloc[0]}  •  **Licence:** {L.loc[L['licence_id']==req.licence_id,'licence_name'].iloc[0]}")
-                notes=st.text_area("Assessment notes")
-                outcome=st.radio("Outcome", ["pass","more_training","fail"], horizontal=True)
-                grant=st.checkbox("Issue licence on pass", value=True)
-                valid_to=st.date_input("Valid to", format=DFMT)
-                if st.button("Save outcome"):
+                notes=st.text_area("Assessment notes", key="comp_notes")
+                outcome=st.radio("Outcome", ["pass","more_training","fail"], horizontal=True, key="comp_outcome")
+                grant=st.checkbox("Issue licence on pass", value=True, key="comp_grant")
+                valid_to=st.date_input("Valid to", format=DFMT, key="comp_valid_to")
+                if st.button("Save outcome", key="comp_save"):
                     AR.loc[AR["request_id"]==sel, ["status","handled_by","handled_on","outcome","notes"]] = ["closed", int(me["user_id"]), pd.Timestamp.today(), outcome, notes]
                     sheets["AssistanceRequests"]=AR
                     if outcome=="pass" and grant:
@@ -355,8 +364,8 @@ with tabs[4]:
             T=sheets.get("Templates", pd.DataFrame(columns=["key","text"]))
             row=T[T["key"]=="newsletter_prompt"]
             prompt=row.iloc[0]["text"] if not row.empty else ""
-            txt=st.text_area("Newsletter Prompt", prompt, height=200)
-            if st.button("Save prompt"):
+            txt=st.text_area("Newsletter Prompt", prompt, height=200, key="nl_prompt")
+            if st.button("Save prompt", key="nl_save"):
                 if row.empty: T=pd.concat([T, pd.DataFrame([["newsletter_prompt", txt]], columns=["key","text"])], ignore_index=True)
                 else: T.loc[T["key"]=="newsletter_prompt","text"]=txt
                 sheets["Templates"]=T; save_db(sheets); st.success("Prompt saved.")
