@@ -18,7 +18,7 @@ if exist "venv" (
 )
 if not exist "venv\Scripts\python.exe" (
   echo [+] Creating virtual environment...
-  %PY_CMD% -3.12 -m venv venv 2>nul || %PY_CMD% -3.11 -m venv venv 2>nul || %PY_CMD% -3 -m venv venv || %PY_CMD% -m venv venv
+  %PY_CMD% -3.12 -m venv venv 2>nul || %PY_CMD% -3.11 -m venv venv 2>nul || %PY_CMD% -3 -m venv venv 2>nul || %PY_CMD% -m venv venv
   if errorlevel 1 (
      echo [!] Could not create venv. Falling back to no-venv mode...
      call "Run_NoVenv.bat"
