@@ -621,13 +621,15 @@ with tabs[3]:
             cur_toggle = str(S.loc[S["key"]=="show_contact_on_bookings", "value"].iloc[0]).strip().lower() in ("1","true","yes","on")
         show_contacts_new = st.checkbox("Show member phone/email on bookings (admin & calendar)", value=cur_toggle)
         if st.button("Save settings"):
-            def upsert(key,val):
-                nonlocal S
-                if S.empty or not (S["key"]==key).any():
-                    S = pd.concat([S, pd.DataFrame([[key,str(val)]], columns=["key","value"])], ignore_index=True)
-                else:
-                    S.loc[S["key"]==key, "value"] = str(val)
-            upsert("admin_password", new_pw); upsert("show_contact_on_bookings", show_contacts_new)
+            # Inline upserts (no nested function / nonlocal)
+            if S.empty or not (S["key"]=="admin_password").any():
+                S = pd.concat([S, pd.DataFrame([["admin_password", str(new_pw)]], columns=["key","value"])], ignore_index=True)
+            else:
+                S.loc[S["key"]=="admin_password", "value"] = str(new_pw)
+            if S.empty or not (S["key"]=="show_contact_on_bookings").any():
+                S = pd.concat([S, pd.DataFrame([["show_contact_on_bookings", str(show_contacts_new)]], columns=["key","value"])], ignore_index=True)
+            else:
+                S.loc[S["key"]=="show_contact_on_bookings", "value"] = str(show_contacts_new)
             sheets["Settings"] = S; save_db(sheets); st.success("Settings saved.")
 
         st.markdown("### Operating hours")
