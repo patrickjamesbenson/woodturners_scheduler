@@ -1,12 +1,9 @@
 
 import streamlit as st
 import pandas as pd
-import numpy as np
-import re
 from datetime import datetime, date, time, timedelta
 from pathlib import Path
-import json, smtplib, ssl
-from email.message import EmailMessage
+import re, json
 
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "data" / "db.xlsx"
@@ -14,12 +11,10 @@ ASSETS = BASE_DIR / "assets"
 
 st.set_page_config(page_title="Woodturners Scheduler", page_icon="🪵", layout="wide")
 
-# ========== Performance helpers ==========
 @st.cache_data(show_spinner=False)
 def load_db():
     xls = pd.ExcelFile(DB_PATH, engine="openpyxl")
     sheets = {name: pd.read_excel(DB_PATH, engine="openpyxl", sheet_name=name) for name in xls.sheet_names}
-    # Ensure expected sheets/columns exist (minimal guards)
     expected = {
         "Users":["user_id","name","email","phone","address","role","password","birth_date","joined_date","newsletter_opt_in"],
         "Licences":["licence_id","licence_name"],
@@ -32,19 +27,10 @@ def load_db():
         "ServiceLog":["service_id","machine_id","date","notes"],
         "OperatingLog":["machine_id","date","hours"],
         "AssistanceRequests":["request_id","requester_user_id","licence_id","message","created"],
-        "MaintenanceRequests":["request_id","requester_user_id","machine_id","message","created"],
         "Subscriptions":["user_id","start_date","end_date","amount","paid","discount_reason","discount_pct"],
         "DiscountReasons":["reason"],
         "UserEvents":["event_id","user_id","event_name","event_date","notes"],
-        "Newsletters":["newsletter_id","title","date","filename"],
-        "Templates":["key","text"],
-        "ClubUpdates":["update_id","title","text","link","date"],
-        "Notices":["notice_id","title","text","link","date"],
-        "MeetingInfo":["meeting_id","title","date","location","agenda_link","rsvp_link"],
-        "SpotlightSubmissions":["submission_id","user_id","title","text","image_file","date","approved"],
-        "ProjectSubmissions":["submission_id","user_id","title","description","image_file","date"],
         "Settings":["key","value"],
-        "NotificationsLog":["when","type","message","sent_to"],
     }
     for s, cols in expected.items():
         if s not in sheets: sheets[s] = pd.DataFrame(columns=cols)
@@ -52,7 +38,7 @@ def load_db():
     for col in ["birth_date","joined_date"]:
         if col in sheets["Users"].columns:
             sheets["Users"][col] = pd.to_datetime(sheets["Users"][col], errors="coerce")
-    for s in ["Bookings","ClosedDates","ServiceLog","OperatingLog","UserEvents","Newsletters","ClubUpdates","Notices","MeetingInfo","Subscriptions"]:
+    for s in ["Bookings","ClosedDates","ServiceLog","OperatingLog","UserEvents","Subscriptions"]:
         if s in sheets:
             for c in sheets[s].columns:
                 if "date" in c or c in ("start","end","created"):
@@ -73,8 +59,7 @@ def get_setting(sheets, key, default=None):
     if m.empty: return default
     v = m.iloc[0]["value"]
     try:
-        if pd.isna(v):
-            return default
+        if pd.isna(v): return default
     except Exception:
         pass
     if v is None: return default
@@ -82,78 +67,34 @@ def get_setting(sheets, key, default=None):
     if s.lower() in ("nan","none","null",""): return default
     return s
 
-def set_setting(sheets, key, value):
-    S = sheets.get("Settings", pd.DataFrame(columns=["key","value"]))
-    if (S["key"]==key).any():
-        S.loc[S["key"]==key,"value"] = str(value)
-    else:
-        S = pd.concat([S, pd.DataFrame([[key, str(value)]], columns=["key","value"])], ignore_index=True)
-    sheets["Settings"]=S
-
-def send_email(subject, body, to_email, attachment=None):
-    host = st.secrets.get("SMTP_HOST", None)
-    if not host:
-        return True, "SMTP not configured"
-    port = int(st.secrets.get("SMTP_PORT", 587))
-    user = st.secrets.get("SMTP_USER", None)
-    pwd  = st.secrets.get("SMTP_PASSWORD", None)
-    from_email = st.secrets.get("FROM_EMAIL", user or "no-reply@example.com")
-    try:
-        msg = EmailMessage()
-        msg["Subject"] = subject
-        msg["From"] = from_email
-        msg["To"] = to_email
-        msg.set_content(body)
-        if attachment is not None:
-            fname, data, mime = attachment
-            maintype, subtype = mime.split("/",1)
-            msg.add_attachment(data, maintype=maintype, subtype=subtype, filename=fname)
-        ctx = ssl.create_default_context()
-        import socket
-        with smtplib.SMTP(host, port, timeout=10) as server:
-            server.starttls(context=ctx)
-            if user and pwd:
-                server.login(user, pwd)
-            server.send_message(msg)
-        return True, "sent"
-    except Exception as e:
-        return False, str(e)
-
-# ========== Load DB then Header ==========
 sheets = load_db()
 
-# Centered logo header (logo is the heading)
-cL, cC, cR = st.columns([1,2,1])
-with cC:
-    logo_file = get_setting(sheets, "active_logo", "logo1.png")
-    st.image(str(ASSETS / logo_file), use_column_width=True)
+# Header (logo centered)
+c1,c2,c3 = st.columns([1,2,1])
+with c2:
+    st.image(str(ASSETS / get_setting(sheets,"active_logo","logo1.png")), use_column_width=True)
 
-# ========== Auth (simple) ==========
-st.sidebar.header("Sign in")
-
+# Auth (simple)
 U = sheets["Users"]
-# Show membership type next to name
 labels = [f"{r.name} ({r.role})" for r in U.itertuples()]
 id_by_label = {f"{r.name} ({r.role})": int(r.user_id) for r in U.itertuples()}
+st.sidebar.header("Sign in")
 label = st.sidebar.selectbox("Your name", [""] + labels, index=0, key="signin_name")
-
 me = None
 if label:
-    me_id = id_by_label.get(label, None)
-    if me_id:
-        row = U[U["user_id"]==me_id].iloc[0]
-        # Require password only for admin/superuser
-        if row["role"] in ("admin","superuser") and str(row.get("password","")).strip():
-            pwd = st.sidebar.text_input("Password", type="password", key="signin_pwd")
-            if st.sidebar.button("Sign in", key="signin_btn"):
-                if pwd == str(row["password"]):
-                    st.session_state["me_id"] = int(row["user_id"])
-                    st.sidebar.success("Signed in")
-                else:
-                    st.sidebar.error("Wrong password")
-        else:
-            if st.sidebar.button("Continue", key="signin_continue"):
+    me_id = id_by_label.get(label)
+    row = U[U["user_id"]==me_id].iloc[0]
+    if row["role"] in ("admin","superuser") and str(row.get("password","")).strip():
+        pwd = st.sidebar.text_input("Password", type="password", key="signin_pwd")
+        if st.sidebar.button("Sign in", key="signin_btn"):
+            if pwd == str(row["password"]):
                 st.session_state["me_id"] = int(row["user_id"])
+                st.sidebar.success("Signed in")
+            else:
+                st.sidebar.error("Wrong password")
+    else:
+        if st.sidebar.button("Continue", key="signin_continue"):
+            st.session_state["me_id"] = int(row["user_id"])
 
 if "me_id" in st.session_state:
     me = U[U["user_id"]==st.session_state["me_id"]].iloc[0].to_dict()
@@ -161,10 +102,8 @@ if "me_id" in st.session_state:
 else:
     st.sidebar.warning("Select your name and sign in to continue.")
 
-# ========== Tabs ==========
-tabs = st.tabs(["Book a Machine","Calendar","My Profile","Assistance","Issues & Maintenance","Admin"])
+tabs = st.tabs(["Book a Machine","Calendar","Issues & Maintenance","Admin"])
 
-# ---------- Helpers ----------
 def user_licence_ids(uid):
     UL = sheets["UserLicences"]
     today = pd.Timestamp.today().normalize()
@@ -174,490 +113,268 @@ def user_licence_ids(uid):
 def machine_options_for(uid):
     lids = user_licence_ids(uid)
     M = sheets["Machines"]
-    allowed = M[M["licence_id"].isin(lids)].copy()
-    not_allowed = M[~M["licence_id"].isin(lids)].copy()
-    return allowed, not_allowed
+    return M[M["licence_id"].isin(lids)], M[~M["licence_id"].isin(lids)]
 
-def day_bookings(machine_id, day):
+def day_bookings(mid, day):
     B = sheets["Bookings"]
     day_start = pd.Timestamp.combine(day, time(0,0))
     day_end   = day_start + timedelta(days=1)
-    m = B[(B["machine_id"]==machine_id) & (B["start"]<day_end) & (B["end"]>day_start)].copy()
+    m = B[(B["machine_id"]==mid) & (B["start"]<day_end) & (B["end"]>day_start)].copy()
     return m.sort_values("start")
 
 def is_open(day, start_t, end_t):
-    import math
     CD = sheets["ClosedDates"]
     day_norm = pd.Timestamp(day).normalize()
     if not CD.empty:
         cdn = pd.to_datetime(CD["date"], errors="coerce").dt.normalize()
-        if (cdn == day_norm).any():
-            return False, "Closed date"
-
-    OH = sheets["OperatingHours"]
-    dow = pd.Timestamp(day).dayofweek
+        if (cdn == day_norm).any(): return False, "Closed date"
+    OH = sheets["OperatingHours"]; dow = pd.Timestamp(day).dayofweek
     row = OH[OH["day_of_week"]==dow]
-    if row.empty:
-        return False, "Closed"
-
-    def parse_time_value(val):
+    if row.empty: return False, "Closed"
+    def parse_t(val):
         try:
             if val is None: return None
-            if isinstance(val, pd.Timestamp):
-                t = val.to_pydatetime().time()
-                return t.hour, t.minute
-            from datetime import time as dtime, datetime as dtdt
-            if isinstance(val, dtime):
-                return val.hour, val.minute
-            if isinstance(val, dtdt):
-                t = val.time()
-                return t.hour, t.minute
-            if isinstance(val, (int, float)) and not pd.isna(val):
-                frac = float(val) % 1.0
-                mins = int(round(frac * 24 * 60))
-                h = (mins // 60) % 24
-                m = mins % 60
-                return h, m
-            s = str(val).strip()
-            if not s:
-                return None
-            s_lower = s.lower()
-            if re.match(r'^\d+(\.\d+)?$', s_lower):
-                f = float(s_lower)
-                mins = int(round((f % 24) * 60))
-                return mins//60, mins%60
-            ampm = None
-            if 'am' in s_lower or 'pm' in s_lower:
-                ampm = 'pm' if 'pm' in s_lower else 'am'
-                s_lower = s_lower.replace('am','').replace('pm','').strip()
-            parts = re.split(r'[:h]', s_lower)
-            if len(parts)>=1 and parts[0].isdigit():
-                h = int(parts[0])
-                m = int(parts[1]) if len(parts)>=2 and parts[1].isdigit() else 0
-                if ampm:
-                    if ampm=='pm' and h != 12: h += 12
-                    if ampm=='am' and h == 12: h = 0
-                if 0 <= h < 24 and 0 <= m < 60:
-                    return h, m
-        except Exception:
-            return None
-        return None
-
-    open_tuple = parse_time_value(row.iloc[0].get("open_time"))
-    close_tuple = parse_time_value(row.iloc[0].get("close_time"))
-    if not open_tuple or not close_tuple:
-        return False, "Closed"
-
-    o_h, o_m = open_tuple
-    c_h, c_m = close_tuple
-
-    start_min = start_t.hour*60 + start_t.minute
-    end_min   = end_t.hour*60 + end_t.minute
-    open_min  = o_h*60 + o_m
-    close_min = c_h*60 + c_m
-
-    within = (open_min <= start_min) and (end_min <= close_min)
-    return within, f"{o_h:02d}:{o_m:02d}–{c_h:02d}:{c_m:02d}"
+            if isinstance(val, pd.Timestamp): t=val.to_pydatetime().time(); return t.hour,t.minute
+            from datetime import time as T, datetime as D
+            if isinstance(val, T): return val.hour,val.minute
+            if isinstance(val, D): t=val.time(); return t.hour,t.minute
+            if isinstance(val,(int,float)) and not pd.isna(val):
+                mins=int(round((float(val)%1.0)*24*60)); return mins//60, mins%60
+            s=str(val).strip()
+            if not s: return None
+            sL=s.lower()
+            ampm=None
+            if "am" in sL or "pm" in sL:
+                ampm="pm" if "pm" in sL else "am"
+                sL=sL.replace("am","").replace("pm","").strip()
+            parts=re.split(r'[:h]', sL)
+            h=int(parts[0]); m=int(parts[1]) if len(parts)>1 else 0
+            if ampm:
+                if ampm=="pm" and h!=12: h+=12
+                if ampm=="am" and h==12: h=0
+            return h,m
+        except: return None
+    ot=parse_t(row.iloc[0].get("open_time")); ct=parse_t(row.iloc[0].get("close_time"))
+    if not ot or not ct: return False, "Closed"
+    o_h,o_m=ot; c_h,c_m=ct
+    start_min=start_t.hour*60+start_t.minute; end_min=end_t.hour*60+end_t.minute
+    open_min=o_h*60+o_m; close_min=c_h*60+c_m
+    return (open_min<=start_min) and (end_min<=close_min), f"{o_h:02d}:{o_m:02d}–{c_h:02d}:{c_m:02d}"
 
 def next_booking_id():
-    B = sheets["Bookings"]
-    if B.empty: return 1
-    return int(pd.to_numeric(B["booking_id"], errors="coerce").fillna(0).max()) + 1
+    B=sheets["Bookings"]
+    return int(pd.to_numeric(B["booking_id"], errors="coerce").fillna(0).max())+1 if not B.empty else 1
 
-# ---------- Book a Machine ----------
 with tabs[0]:
     st.subheader("Book a Machine")
-    if me is None:
+    if not me:
         st.info("Sign in to book.")
     else:
-        colA, colB = st.columns(2)
-        with colA:
-            st.write(f"**Member:** {me['name']} ({me['role']})")
-            allowed, not_allowed = machine_options_for(int(me["user_id"]))
-            # Licensed options only in dropdown
-            opts = [f"{r.machine_id} - {r.machine_name}" for r in allowed.itertuples()]
-            if not opts:
-                st.error("You don’t have any active licences today. Ask an admin to assign one.")
-                st.stop()
-            choice = st.selectbox("Machine", opts, index=0, key="book_machine")
-            machine_id = int(choice.split(" - ")[0])
-            machine_row = sheets["Machines"][sheets["Machines"]["machine_id"]==machine_id].iloc[0]
-        with colB:
-            day = st.date_input("Day", value=date.today(), key="book_day")
-            st.caption("Availability below updates as you change day/machine.")
-
-        # Show day's bookings
-        day_df = day_bookings(machine_id, day)
-        if day_df.empty:
-            st.success("No bookings yet — all day is available during opening hours.")
+        allowed, not_allowed = machine_options_for(int(me["user_id"]))
+        opts = [f"{r.machine_id} - {r.machine_name}" for r in allowed.itertuples()]
+        if not opts:
+            st.error("No active licences found. Ask an admin.")
         else:
-            st.dataframe(day_df[["start","end","purpose","notes","status"]], use_container_width=True, hide_index=True)
+            choice = st.selectbox("Machine", opts, key="book_m")
+            mid = int(choice.split(" - ")[0])
+            day = st.date_input("Day", value=date.today(), key="book_day")
+            start_time = st.time_input("Start time", value=time(9,0), key="book_start")
+            mrow = sheets["Machines"][sheets["Machines"]["machine_id"]==mid].iloc[0]
+            max_mins = int(mrow.get("max_duration_minutes",120) or 120)
+            dur = st.slider("Duration (minutes)", 30, max_mins, min(60,max_mins), step=30, key="book_dur")
+            st.caption("Availability:")
+            st.dataframe(day_bookings(mid, day)[["start","end","purpose","status"]], use_container_width=True, hide_index=True)
+            end_dt = datetime.combine(day, start_time) + timedelta(minutes=int(dur))
+            ok_hours, msg = is_open(day, start_time, end_dt.time())
+            if not ok_hours: st.error(f"Outside operating hours ({msg}).")
+            overlap=False
+            for r in day_bookings(mid, day).itertuples():
+                if not (end_dt <= r.start or datetime.combine(day, start_time) >= r.end):
+                    overlap=True; break
+            if overlap: st.error("Overlaps an existing booking.")
+            if st.button("Confirm booking", key="book_go") and ok_hours and not overlap:
+                B=sheets["Bookings"]
+                new=pd.DataFrame([[next_booking_id(), int(me["user_id"]), mid, datetime.combine(day,start_time), end_dt, "use","", "confirmed"]],
+                                 columns=B.columns)
+                sheets["Bookings"]=pd.concat([B,new], ignore_index=True); save_db(sheets); st.success("Booked."); st.rerun()
 
-        # Non-licensed machines greyed list (informational)
-        if not not_allowed.empty:
-            st.markdown("**Machines you are not licensed for (read-only)**")
-            styled = not_allowed[["machine_name"]].style.set_properties(**{"color":"#8a8a8a"})
-            st.dataframe(not_allowed[["machine_id","machine_name","serial_no"]], use_container_width=True, hide_index=True)
-
-        # Duration slider bounded by machine max
-        max_dur = int(machine_row.get("max_duration_minutes", 120) or 120)
-        dur = st.slider("Duration (minutes)", min_value=30, max_value=max_dur, step=30, value=min(60,max_dur), key="book_dur")
-
-        # Start time picker
-        start_time = st.time_input("Start time", value=time(9,0), key="book_start")
-
-        # Validate opening hours & overlaps
-        start_dt = datetime.combine(day, start_time)
-        end_dt = start_dt + timedelta(minutes=int(dur))
-        ok_hours, hours_msg = is_open(day, start_time, end_dt.time())
-        if not ok_hours:
-            st.error(f"Outside operating hours ({hours_msg}).")
-
-        overlap = False
-        for r in day_df.itertuples():
-            if not (end_dt <= r.start or start_dt >= r.end):
-                overlap = True; break
-        if overlap:
-            st.error("Overlaps an existing booking.")
-
-        can_book = (me is not None) and ok_hours and (not overlap)
-
-        if st.button("Confirm booking", key="book_confirm"):
-            if not can_book:
-                st.stop()
-            B = sheets["Bookings"]
-            new_id = next_booking_id()
-            new = pd.DataFrame([[new_id, int(me["user_id"]), int(machine_id), pd.Timestamp(start_dt), pd.Timestamp(end_dt), "use", "", "confirmed"]],
-                               columns=["booking_id","user_id","machine_id","start","end","purpose","notes","status"])
-            sheets["Bookings"] = pd.concat([B, new], ignore_index=True)
-            # Update hours_used estimate
-            M = sheets["Machines"]
-            idx = M.index[M["machine_id"]==int(machine_id)]
-            if len(idx): M.loc[idx, "hours_used"] = (M.loc[idx, "hours_used"].fillna(0) + (dur/60)).values
-            sheets["Machines"] = M
-            save_db(sheets)
-            st.success("Booking confirmed.")
-            st.experimental_rerun()
-
-# ---------- Calendar ----------
 with tabs[1]:
     st.subheader("Calendar")
-    col1, col2 = st.columns([1,2])
-    with col1:
-        mopts = sheets["Machines"][["machine_id","machine_name"]].copy()
-        sel = st.selectbox("Machine", [f"{r.machine_id} - {r.machine_name}" for r in mopts.itertuples()], index=0, key="cal_machine")
-        mid = int(sel.split(" - ")[0])
-        view = st.radio("View", ["Day","Week"], horizontal=True, key="cal_view")
-        base_day = st.date_input("Day", value=date.today(), key="cal_day")
-    with col2:
-        if view=="Day":
-            df = day_bookings(mid, base_day)
-            st.dataframe(df[["start","end","purpose","status","notes"]], use_container_width=True, hide_index=True)
-        else:
-            start_w = base_day - timedelta(days=base_day.weekday())
-            rows = []
-            for d in range(7):
-                day = start_w + timedelta(days=d)
-                for r in day_bookings(mid, day).itertuples():
-                    rows.append([day, r.start.time(), r.end.time(), r.purpose, r.status])
-            W = pd.DataFrame(rows, columns=["day","start","end","purpose","status"])
-            st.dataframe(W, use_container_width=True, hide_index=True)
+    M = sheets["Machines"]; sel = st.selectbox("Machine", [f"{r.machine_id} - {r.machine_name}" for r in M.itertuples()], key="cal_m")
+    mid=int(sel.split(" - ")[0]); base_day = st.date_input("Day", value=date.today(), key="cal_day")
+    view = st.radio("View", ["Day","Week"], horizontal=True, key="cal_view")
+    if view=="Day":
+        st.dataframe(day_bookings(mid, base_day)[["start","end","purpose","status"]], use_container_width=True, hide_index=True)
+    else:
+        start_w = base_day - timedelta(days=base_day.weekday())
+        rows=[]
+        for d in range(7):
+            dd=start_w+timedelta(days=d)
+            for r in day_bookings(mid, dd).itertuples():
+                rows.append([dd, r.start.time(), r.end.time(), r.purpose])
+        st.dataframe(pd.DataFrame(rows, columns=["day","start","end","purpose"]), use_container_width=True, hide_index=True)
 
-# ---------- My Profile ----------
 with tabs[2]:
-    st.subheader("My Profile")
-    if me is None:
-        st.info("Sign in to view your profile.")
-    else:
-        row = U[U["user_id"]==int(me["user_id"])].iloc[0]
-        st.markdown(f"**Name:** {row['name']}  ")
-        st.markdown(f"**Role:** {row['role']}  ")
-        st.markdown(f"**Phone:** {row.get('phone','')}  ")
-        st.markdown(f"**Email:** {row.get('email','')}  ")
-        st.markdown(f"**Address:** {row.get('address','')}  ")
-        st.markdown(f"**Birth date:** {str(row.get('birth_date',''))}")
-        st.divider()
-        flag = bool(row.get("newsletter_opt_in", True))
-        new_flag = st.checkbox("Subscribed to newsletter", value=flag, key="prof_sub")
-        if st.button("Save subscription", key="prof_save_sub"):
-            idx = U.index[U["user_id"]==int(me["user_id"])]
-            U.loc[idx, "newsletter_opt_in"] = bool(new_flag)
-            sheets["Users"] = U; save_db(sheets); st.success("Saved.")
-        st.divider()
-        st.markdown("### Significant events")
-        ev_name = st.text_input("Event name", key="prof_ev_name")
-        ev_date = st.date_input("Event date", value=date.today(), key="prof_ev_date")
-        ev_notes = st.text_input("Notes", key="prof_ev_notes")
-        if st.button("Add event", key="prof_add_ev"):
-            UE = sheets.get("UserEvents", pd.DataFrame(columns=["event_id","user_id","event_name","event_date","notes"]))
-            eid = int(pd.to_numeric(UE.get("event_id"), errors="coerce").fillna(0).max()) + 1 if not UE.empty else 1
-            new = pd.DataFrame([[eid, int(me['user_id']), ev_name.strip(), pd.Timestamp(ev_date), ev_notes.strip()]], columns=["event_id","user_id","event_name","event_date","notes"])
-            sheets["UserEvents"] = pd.concat([UE, new], ignore_index=True); save_db(sheets); st.success("Event added.")
-        UE = sheets.get("UserEvents", pd.DataFrame())
-        mine = UE[UE["user_id"]==int(me["user_id"])]
-        if not mine.empty:
-            st.dataframe(mine.sort_values("event_date", ascending=False), use_container_width=True, hide_index=True)
-
-# ---------- Assistance ----------
-with tabs[3]:
-    st.subheader("Ask for assistance / mentorship")
-    if me is None:
-        st.info("Sign in to send a request.")
-    else:
-        L = sheets["Licences"]
-        lic_name_to_id = {r.licence_name: r.licence_id for r in L.itertuples()}
-        sel = st.selectbox("Which skill/machine do you want help with?", ["(general)"] + list(lic_name_to_id.keys()), key="assist_skill")
-        msg = st.text_area("Describe what you need help with", key="assist_msg")
-        if st.button("Send request", key="assist_send"):
-            AR = sheets["AssistanceRequests"]
-            rid = int(pd.to_numeric(AR.get("request_id"), errors="coerce").fillna(0).max()) + 1 if not AR.empty else 1
-            lic_id = lic_name_to_id.get(sel, None)
-            new = pd.DataFrame([[rid, int(me["user_id"]), lic_id, msg, pd.Timestamp.today()]], columns=["request_id","requester_user_id","licence_id","message","created"])
-            sheets["AssistanceRequests"] = pd.concat([AR,new], ignore_index=True); save_db(sheets); st.success("Request sent.")
-
-# ---------- Issues & Maintenance ----------
-with tabs[4]:
     st.subheader("Issues & Maintenance")
-    col1, col2 = st.columns(2)
-    with col1:
-        st.markdown("### Log an issue")
-        msel = st.selectbox("Machine", [f"{r.machine_id} - {r.machine_name}" for r in sheets["Machines"].itertuples()], key="iss_machine")
-        mid = int(msel.split(" - ")[0])
-        text = st.text_area("Describe the issue", key="iss_text")
-        if me and st.button("Submit issue", key="iss_submit"):
-            I = sheets["Issues"]
-            iid = int(pd.to_numeric(I.get("issue_id"), errors="coerce").fillna(0).max()) + 1 if not I.empty else 1
-            new = pd.DataFrame([[iid, mid, int(me["user_id"]), pd.Timestamp.today(), "open", text]], columns=["issue_id","machine_id","user_id","created","status","text"])
-            sheets["Issues"] = pd.concat([I,new], ignore_index=True); save_db(sheets); st.success("Issue logged.")
-    with col2:
-        st.markdown("### Recent issues")
-        I = sheets["Issues"].copy()
-        if I.empty:
-            st.info("No issues logged.")
-        else:
-            st.dataframe(I.sort_values("created", ascending=False).head(30), use_container_width=True, hide_index=True)
+    msel = st.selectbox("Machine", [f"{r.machine_id} - {r.machine_name}" for r in sheets["Machines"].itertuples()], key="iss_m")
+    mid = int(msel.split(" - ")[0])
+    text = st.text_area("Describe an issue")
+    if me and st.button("Submit issue"):
+        I=sheets["Issues"]; iid=int(pd.to_numeric(I["issue_id"], errors="coerce").fillna(0).max())+1 if not I.empty else 1
+        new=pd.DataFrame([[iid, mid, int(me["user_id"]), pd.Timestamp.today(), "open", text]], columns=I.columns)
+        sheets["Issues"]=pd.concat([I,new], ignore_index=True); save_db(sheets); st.success("Issue logged.")
+    I = sheets["Issues"].copy()
+    if I.empty: st.info("No issues yet.")
+    else: st.dataframe(I.sort_values("created", ascending=False), use_container_width=True, hide_index=True)
 
-# ---------- Admin ----------
-with tabs[5]:
-    if me is None or me["role"] not in ("admin","superuser"):
-        st.info("Admins only. Sign in as an admin.")
+with tabs[3]:
+    if not me or me["role"] not in ("admin","superuser"):
+        st.info("Admins only.")
     else:
-        at = st.tabs(["Users","Licences","Machines","Schedule","Newsletter","Notifications"])
+        at = st.tabs(["Users","Licences","Machines","Schedule","Hours & Holidays","Notifications"])
 
-        # Users
         with at[0]:
             st.markdown("### Users")
             st.dataframe(sheets["Users"][["user_id","name","role","email","phone","birth_date","joined_date","newsletter_opt_in"]], use_container_width=True, hide_index=True)
-            st.markdown("Add a user")
-            name = st.text_input("Full name", key="adm_add_name")
-            email = st.text_input("Email", key="adm_add_email")
-            phone = st.text_input("Phone", key="adm_add_phone")
-            addr = st.text_input("Address", key="adm_add_addr")
-            role = st.selectbox("Role", ["user","superuser","admin"], key="adm_add_role")
-            pwd = st.text_input("Password (only for admin/superuser)", key="adm_add_pwd")
-            bdate = st.date_input("Birth date", value=date(1970,1,1), key="adm_add_birth")
-            jdate = st.date_input("Joined date", value=date.today(), key="adm_add_join")
-            if st.button("Create user", key="adm_add_btn"):
-                U = sheets["Users"]
-                new_id = int(pd.to_numeric(U["user_id"], errors="coerce").fillna(0).max()) + 1 if not U.empty else 1
-                new = pd.DataFrame([[new_id, name, email, phone, addr, role, pwd if role in ("admin","superuser") else "", bdate, jdate, True]], columns=U.columns)
-                sheets["Users"] = pd.concat([U,new], ignore_index=True); save_db(sheets); st.success(f"User {name} added."); st.experimental_rerun()
 
-        # Licences
         with at[1]:
             st.markdown("### Licences")
             st.dataframe(sheets["Licences"], use_container_width=True, hide_index=True)
-            st.markdown("Assign licence to user")
-            u = st.selectbox("User", [f"{r.user_id} - {r.name} ({r.role})" for r in sheets["Users"].itertuples()], key="adm_lic_user")
-            l = st.selectbox("Licence", [f"{r.licence_id} - {r.licence_name}" for r in sheets["Licences"].itertuples()], key="adm_lic_lic")
-            vf = st.date_input("Valid from", value=date.today(), key="adm_lic_from")
-            vt = st.date_input("Valid to", value=date.today() + timedelta(days=365), key="adm_lic_to")
-            if st.button("Assign", key="adm_lic_assign"):
-                UL = sheets["UserLicences"]
-                uid = int(u.split(" - ")[0]); lid = int(l.split(" - ")[0])
-                new = pd.DataFrame([[uid,lid,vf,vt]], columns=UL.columns)
-                sheets["UserLicences"] = pd.concat([UL,new], ignore_index=True); save_db(sheets); st.success("Assigned.")
 
-        # Machines
         with at[2]:
             st.markdown("### Machines")
             st.dataframe(sheets["Machines"], use_container_width=True, hide_index=True)
-            st.markdown("Add maintenance booking")
-            msel = st.selectbox("Machine", [f"{r.machine_id} - {r.machine_name}" for r in sheets["Machines"].itertuples()], key="adm_msel")
-            mid = int(msel.split(" - ")[0])
-            mday = st.date_input("Day", value=date.today(), key="adm_mday")
-            stime = st.time_input("Start", value=time(9,0), key="adm_mtime")
-            dur = st.slider("Duration (minutes)", 30, 240, 60, step=30, key="adm_mdur")
-            if st.button("Schedule maintenance", key="adm_mbtn"):
-                B = sheets["Bookings"]; new_id = int(pd.to_numeric(B["booking_id"], errors="coerce").fillna(0).max()) + 1 if not B.empty else 1
-                st_dt = datetime.combine(mday, stime); en_dt = st_dt + timedelta(minutes=int(dur))
-                new = pd.DataFrame([[new_id, int(me["user_id"]), mid, st_dt, en_dt, "maintenance", "Scheduled by admin", "confirmed"]], columns=B.columns)
-                sheets["Bookings"] = pd.concat([B,new], ignore_index=True); save_db(sheets); st.success("Maintenance scheduled.")
+            st.markdown("#### Inline machines editor (name, serial, next service)")
+            M = sheets["Machines"].copy()
+            for c in ["machine_id","machine_name","serial_no","next_service_due"]:
+                if c not in M.columns: M[c]=None
+            try:
+                cfg = {
+                    "machine_id": st.column_config.NumberColumn("ID", disabled=True),
+                    "machine_name": st.column_config.TextColumn("Name"),
+                    "serial_no": st.column_config.TextColumn("Serial #"),
+                    "next_service_due": st.column_config.DateColumn("Next service"),
+                }
+            except Exception:
+                cfg = None
+            edited = st.data_editor(M[["machine_id","machine_name","serial_no","next_service_due"]], num_rows="fixed", hide_index=True, column_config=cfg if cfg else None, key="adm_m_table")
+            if st.button("Save machine changes", key="adm_m_save"):
+                M2 = M.set_index("machine_id"); E2 = edited.set_index("machine_id")
+                for col in ["machine_name","serial_no","next_service_due"]:
+                    if col in E2.columns:
+                        M2[col]=E2[col]
+                M2["next_service_due"]=pd.to_datetime(M2["next_service_due"], errors="coerce")
+                sheets["Machines"]=M2.reset_index(); save_db(sheets); st.success("Saved."); st.rerun()
 
-        # Schedule
+            st.markdown("#### Edit max duration (per machine)")
+            em1,em2,em3=st.columns([2,1,1])
+            with em1:
+                em_sel = st.selectbox("Machine", [f"{r.machine_id} - {r.machine_name}" for r in sheets["Machines"].itertuples()], key="adm_m_sel")
+            with em2:
+                em_val = st.number_input("Max minutes", 30, 480, int(sheets["Machines"].loc[sheets["Machines"]["machine_id"]==int(em_sel.split(" - ")[0]),"max_duration_minutes"].iloc[0]), step=30, key="adm_m_val")
+            with em3:
+                if st.button("Save max duration", key="adm_m_set"):
+                    M3=sheets["Machines"]; mid=int(em_sel.split(" - ")[0]); M3.loc[M3["machine_id"]==mid,"max_duration_minutes"]=int(em_val); sheets["Machines"]=M3; save_db(sheets); st.success("Saved.")
+
         with at[3]:
-            st.markdown("### Day roster & week utilisation")
+            st.markdown("### Day roster")
             d = st.date_input("Day", value=date.today(), key="adm_roster_day")
             rows = []
             for m in sheets["Machines"].itertuples():
                 for r in day_bookings(m.machine_id, d).itertuples():
                     rows.append([m.machine_name, r.start.time(), r.end.time(), r.purpose])
-            roster = pd.DataFrame(rows, columns=["Machine","Start","End","Purpose"])
-            st.dataframe(roster, use_container_width=True, hide_index=True)
-            st.markdown("Week view (booked hours per machine)")
-            start_w = d - timedelta(days=d.weekday())
-            util = []
-            for m in sheets["Machines"].itertuples():
-                hours = 0.0
-                for i in range(7):
-                    dd = start_w + timedelta(days=i)
-                    for r in day_bookings(m.machine_id, dd).itertuples():
-                        hours += (r.end - r.start).total_seconds()/3600.0
-                util.append([m.machine_name, round(hours,1)])
-            st.dataframe(pd.DataFrame(util, columns=["Machine","Booked hours (week)"]), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(rows, columns=["Machine","Start","End","Purpose"]), use_container_width=True, hide_index=True)
 
-        # Newsletter
         with at[4]:
-            st.markdown("### Newsletter")
-            c1,c2 = st.columns(2)
-            with c1:
-                editor_name = st.text_input("Editor name", value=str(get_setting(sheets,"newsletter_editor_name","")), key="nl_editor_name")
-                editor_email = st.text_input("Editor email", value=str(get_setting(sheets,"newsletter_editor_email","")), key="nl_editor_email")
-                try:
-                    issue_day = int(get_setting(sheets,"newsletter_issue_day",1) or 1)
-                except:
-                    issue_day = 1
-                issue_day_new = st.number_input("Issue day (1–28)", 1, 28, issue_day, key="nl_issue_day")
-            with c2:
-                app_url = st.text_input("App public URL", value=str(get_setting(sheets,"app_public_url","") or ""), key="nl_app_url")
-                org_name = st.text_input("Organisation name", value=str(get_setting(sheets,"org_name","Woodturners of the Hunter")), key="nl_org_name")
-                website_url = st.text_input("Website URL", value=str(get_setting(sheets,"website_url","")), key="nl_site")
-                postal_address = st.text_input("Postal address", value=str(get_setting(sheets,"postal_address","")), key="nl_postal")
-                logo_url = st.text_input("Logo URL (for emails)", value=str(get_setting(sheets,"logo_url","")), key="nl_logo_url")
-            st.markdown("Branding")
-            logos = ["logo1.png", "logo2.png", "logo3.png"]
-            current_logo = get_setting(sheets,"active_logo","logo1.png")
-            pick = st.selectbox("Active logo (assets/)", logos, index=logos.index(current_logo) if current_logo in logos else 0, key="nl_logo_pick")
-            if st.button("Use selected logo", key="nl_use_logo"):
-                set_setting(sheets,"active_logo", pick); save_db(sheets); st.success(f"Logo set to {pick}"); st.experimental_rerun()
-
-            st.markdown("Links")
-            cL1, cL2 = st.columns(2)
-            with cL1:
-                approve_url = st.text_input("Approve URL", value=str(get_setting(sheets,"approve_url","")), key="nl_approve")
-                edit_url = st.text_input("Edit URL", value=str(get_setting(sheets,"edit_url","")), key="nl_edit")
-                market_stall_eoi_link = st.text_input("Market stall EOI link", value=str(get_setting(sheets,"market_stall_eoi_link","")), key="nl_eoi")
-            with cL2:
-                upload_link = st.text_input("Upload photos link", value=str(get_setting(sheets,"link_upload","")), key="nl_upload")
-                mentorship_link = st.text_input("Mentorship link", value=str(get_setting(sheets,"link_mentorship","")), key="nl_mentor")
-                join_link = st.text_input("Join link", value=str(get_setting(sheets,"link_join","")), key="nl_join")
-                rsvp_link = st.text_input("RSVP link", value=str(get_setting(sheets,"link_rsvp","")), key="nl_rsvp")
-
-            if st.button("Save settings", key="nl_save"):
-                set_setting(sheets,"newsletter_editor_name", editor_name)
-                set_setting(sheets,"newsletter_editor_email", editor_email)
-                set_setting(sheets,"newsletter_issue_day", issue_day_new)
-                set_setting(sheets,"app_public_url", app_url)
-                for k,v in [("org_name",org_name),("website_url",website_url),("postal_address",postal_address),("logo_url",logo_url),
-                            ("approve_url",approve_url),("edit_url",edit_url),("market_stall_eoi_link",market_stall_eoi_link),
-                            ("link_upload",upload_link),("link_mentorship",mentorship_link),("link_join",join_link),("link_rsvp",rsvp_link)]:
-                    set_setting(sheets,k,v)
-                save_db(sheets); st.success("Saved.")
+            st.markdown("### Weekly operating hours")
+            day_names=["Mon","Tue","Wed","Thu","Fri","Sat","Sun"]
+            OH = sheets.get("OperatingHours").copy()
+            if OH.empty or set(OH["day_of_week"].tolist()) != set(range(7)):
+                rows = []
+                for d in range(7):
+                    rows.append([d, "09:00" if d in (1,2,3,4,5) else "", "16:00" if d in (1,2,3,4,5) else ""])
+                OH = pd.DataFrame(rows, columns=["day_of_week","open_time","close_time"])
+            cols = st.columns([1,1,1,1,1,1,1])
+            open_vals={}; open_times={}; close_times={}
+            for d in range(7):
+                with cols[d]:
+                    st.write(f"**{day_names[d]}**")
+                    ot = str(OH.loc[OH["day_of_week"]==d,"open_time"].iloc[0]) if not OH.empty else ""
+                    ct = str(OH.loc[OH["day_of_week"]==d,"close_time"].iloc[0]) if not OH.empty else ""
+                    is_open = bool(str(ot).strip()) and bool(str(ct).strip())
+                    open_vals[d] = st.checkbox("Open", value=is_open, key=f"hrs_open_{d}")
+                    import datetime as _dt
+                    def _to_time(s, default_h):
+                        try:
+                            s = str(s).strip()
+                            if not s or s.lower() in ("nan","none","null"): return _dt.time(default_h,0)
+                            parts=re.split(r'[:h]', s); h=int(parts[0]); m=int(parts[1]) if len(parts)>1 else 0
+                            return _dt.time(h%24, m%60)
+                        except: return _dt.time(default_h,0)
+                    open_times[d] = st.time_input("Open", value=_to_time(ot,9), key=f"hrs_ot_{d}")
+                    close_times[d] = st.time_input("Close", value=_to_time(ct,16), key=f"hrs_ct_{d}")
+            if st.button("Copy Tue → Mon–Fri", key="hrs_copy_tue_weekdays"):
+                src_open=open_times.get(1); src_close=close_times.get(1); src_flag=open_vals.get(1,False)
+                for d2 in range(0,5):
+                    open_vals[d2]=bool(src_flag); open_times[d2]=src_open; close_times[d2]=src_close
+                st.info("Copied Tuesday hours to Mon–Fri. Click 'Save weekly hours' to persist.")
+            if st.button("Copy Tue → Tue–Sat", key="hrs_copy_tue_tuesat"):
+                src_open=open_times.get(1); src_close=close_times.get(1); src_flag=open_vals.get(1,False)
+                for d2 in range(1,6):
+                    open_vals[d2]=bool(src_flag); open_times[d2]=src_open; close_times[d2]=src_close
+                st.info("Copied Tuesday hours to Tue–Sat. Click 'Save weekly hours' to persist.")
+            cbtn1,cbtn2=st.columns([1,1])
+            with cbtn1:
+                if st.button("Set weekdays open 09:00–16:00", key="hrs_weekdays_open"):
+                    import datetime as _dt
+                    for d2 in range(0,5):
+                        open_vals[d2]=True; open_times[d2]=_dt.time(9,0); close_times[d2]=_dt.time(16,0)
+                    st.info("Weekday hours staged. Click 'Save weekly hours' to persist.")
+            with cbtn2:
+                if st.button("Close weekdays", key="hrs_weekdays_close"):
+                    for d2 in range(0,5): open_vals[d2]=False
+                    st.info("Weekdays set to closed (staged). Click 'Save weekly hours' to persist.")
+            if st.button("Save weekly hours", key="hrs_save"):
+                rows=[]
+                for d in range(7):
+                    if open_vals[d]:
+                        rows.append([d, f"{open_times[d].hour:02d}:{open_times[d].minute:02d}", f"{close_times[d].hour:02d}:{close_times[d].minute:02d}"])
+                    else:
+                        rows.append([d,"",""])
+                sheets["OperatingHours"]=pd.DataFrame(rows, columns=["day_of_week","open_time","close_time"]); save_db(sheets); st.success("Saved.")
 
             st.divider()
-            st.markdown("#### Prompt template")
-            T = sheets.get("Templates", pd.DataFrame(columns=["key","text"]))
-            row = T[T["key"]=="newsletter_prompt"]
-            default_prompt = "(set in app)"
-            current = row.iloc[0]["text"] if not row.empty else default_prompt
-            new_prompt = st.text_area("Template", value=str(current), height=300, key="nl_prompt")
-            if st.button("Save prompt", key="nl_save_prompt"):
-                if row.empty:
-                    T = pd.concat([T, pd.DataFrame([["newsletter_prompt", new_prompt]], columns=["key","text"])], ignore_index=True)
-                else:
-                    T.loc[T["key"]=="newsletter_prompt","text"]=new_prompt
-                sheets["Templates"]=T; save_db(sheets); st.success("Prompt saved.")
+            st.markdown("### Closed dates")
+            CD = sheets.get("ClosedDates", pd.DataFrame(columns=["date","reason"])).copy()
+            if CD.empty: st.info("No closed dates configured.")
+            else: st.dataframe(CD.sort_values("date"), use_container_width=True, hide_index=True)
+            nd = st.date_input("Closed date", key="closed_add_date"); nr = st.text_input("Reason", key="closed_add_reason")
+            a1,a2=st.columns([1,1])
+            with a1:
+                if st.button("Add closed date", key="closed_add_btn"):
+                    CD = pd.concat([CD, pd.DataFrame([[pd.Timestamp(nd), nr]], columns=["date","reason"])], ignore_index=True); sheets["ClosedDates"]=CD; save_db(sheets); st.success("Added."); st.rerun()
+            with a2:
+                if not CD.empty:
+                    del_ix = st.number_input("Delete row # (see index on left)", min_value=0, max_value=len(CD)-1, value=0, key="closed_del_ix")
+                    if st.button("Delete selected", key="closed_del_btn"):
+                        CD2 = CD.drop(CD.index[int(del_ix)]).reset_index(drop=True); sheets["ClosedDates"]=CD2; save_db(sheets); st.success("Removed."); st.rerun()
 
-            st.markdown("#### Build DATA.json")
-            U = sheets["Users"].copy()
-            U["opted_in"] = U.get("newsletter_opt_in", True)
-            members = []
-            for r in U.itertuples():
-                if bool(r.opted_in) and str(r.email).strip():
-                    parts = r.name.split()
-                    members.append({
-                        "first_name": parts[0],
-                        "last_name": parts[-1] if len(parts)>1 else "",
-                        "email": r.email,
-                        "birth_date": str(pd.to_datetime(r.birth_date).date()) if pd.notna(r.birth_date) else None,
-                        "joined_date": str(pd.to_datetime(r.joined_date).date()) if pd.notna(r.joined_date) else None,
-                        "suburb": (str(r.address).split(",")[0].strip() if "," in str(r.address) else str(r.address)),
-                        "opted_in": True
-                    })
-            UE = sheets.get("UserEvents", pd.DataFrame())
-            events = []
-            if not UE.empty:
-                for r in UE.itertuples():
-                    em = U.loc[U["user_id"]==r.user_id,"email"].values
-                    member_email = em[0] if len(em) else ""
-                    events.append({
-                        "member_email": member_email,
-                        "date": str(pd.to_datetime(r.event_date).date()) if pd.notna(r.event_date) else None,
-                        "type": "other",
-                        "title": r.event_name,
-                        "detail": r.notes or ""
-                    })
-            data = {
-                "members": members,
-                "significant_events": events,
-                "club_updates": sheets.get("ClubUpdates", pd.DataFrame()).to_dict(orient="records"),
-                "notices": sheets.get("Notices", pd.DataFrame()).to_dict(orient="records"),
-                "spotlight_submissions": sheets.get("SpotlightSubmissions", pd.DataFrame()).to_dict(orient="records"),
-                "project_submissions": sheets.get("ProjectSubmissions", pd.DataFrame()).to_dict(orient="records"),
-                "mentors_offering": [],
-                "mentorship_requests": sheets.get("AssistanceRequests", pd.DataFrame()).to_dict(orient="records"),
-                "meeting_info": sheets.get("MeetingInfo", pd.DataFrame()).iloc[-1].to_dict() if not sheets.get("MeetingInfo", pd.DataFrame()).empty else {},
-                "links": {
-                    "upload_link": get_setting(sheets,"link_upload",""),
-                    "mentorship_link": get_setting(sheets,"link_mentorship",""),
-                    "join_link": get_setting(sheets,"link_join",""),
-                    "rsvp_link": get_setting(sheets,"link_rsvp",""),
-                    "unsubscribe_link": (lambda _u: (f"{_u.rstrip('/')}/?unsubscribe=1&uid={{user_id}}") if _u else "{{unsubscribe_link}}")(get_setting(sheets,"app_public_url",""))
-                },
-                "last_issue_date": str(get_setting(sheets,"last_issue_date",""))
-            }
-            data_json = json.dumps(data, indent=2, default=str)
-            st.code(data_json, language="json")
-            st.download_button("Download DATA.json", data=data_json.encode("utf-8"), file_name="newsletter_data.json")
-
-            st.markdown("#### Compile prompt")
-            tmpl = new_prompt or default_prompt
-            compiled = (tmpl.replace("🔧ORG_NAME", get_setting(sheets,"org_name","Woodturners of the Hunter"))
-                             .replace("{DATA_JSON}", data_json))
-            st.text_area("Compiled prompt", value=compiled, height=300, key="nl_compiled")
-            st.download_button("Download compiled_prompt.txt", data=compiled.encode("utf-8"), file_name="compiled_prompt.txt")
-
-        # Notifications
         with at[5]:
             st.markdown("### Notifications")
-            msgs = []
+            today=pd.Timestamp.today().normalize()
+            msgs=[]
+            # Newsletter due
             try:
-                issue_day = int(get_setting(sheets, "newsletter_issue_day", 1) or 1)
-            except:
-                issue_day = 1
-            today = pd.Timestamp.today().normalize()
-            this_issue = pd.Timestamp(year=today.year, month=today.month, day=min(issue_day,28))
-            next_issue = this_issue if this_issue >= today else (this_issue + pd.DateOffset(months=1))
-            days = (next_issue - today).days
-            if 0 <= days <= 7:
-                msgs.append(f"Newsletter due on {next_issue.date()}")
-            # Subscriptions expiring within 14 days
-            S = sheets.get("Subscriptions", pd.DataFrame())
+                issue_day=int(get_setting(sheets,"newsletter_issue_day",1) or 1)
+            except: issue_day=1
+            this_issue=pd.Timestamp(year=today.year, month=today.month, day=min(issue_day,28))
+            next_issue=this_issue if this_issue>=today else (this_issue + pd.DateOffset(months=1))
+            days=(next_issue - today).days
+            if 0<=days<=7: msgs.append(f"Newsletter due on {next_issue.date()}")
+            # Subscriptions expiring
+            S=sheets.get("Subscriptions", pd.DataFrame())
             if not S.empty:
-                soon = S[pd.to_datetime(S["end_date"], errors="coerce") <= (today + pd.Timedelta(days=14))]
-                if not soon.empty:
-                    msgs.append(f"{len(soon)} subscription(s) expiring within 14 days.")
-            if msgs:
-                st.write("\n".join([f"• {m}" for m in msgs]))
-            else:
-                st.info("No notifications due.")
+                soon=S[pd.to_datetime(S["end_date"], errors="coerce") <= (today + pd.Timedelta(days=14))]
+                if not soon.empty: msgs.append(f"{len(soon)} subscription(s) expiring within 14 days.")
+            if msgs: st.write("\\n".join([f"• {m}" for m in msgs]))
+            else: st.info("No notifications.")

@@ -10,7 +10,7 @@ if not defined PY_CMD (
   exit /b 1
 )
 %PY_CMD% -m pip install --user --upgrade pip
-%PY_CMD% -m pip install --user streamlit==1.37.1 pandas==2.2.2 openpyxl==3.1.5 numpy python-dateutil pytz
+%PY_CMD% -m pip install --user -r requirements.txt
 set "PORT=8502"
 %PY_CMD% -m streamlit run app.py --server.port %PORT% --server.headless false
 popd
