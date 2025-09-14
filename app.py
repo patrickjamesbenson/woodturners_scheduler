@@ -202,13 +202,13 @@ with tabs[0]:
             allowed_ids = set(allowed["machine_id"].tolist())
             options = [f"{r.machine_id} - {r.label}" for r in all_opts.itertuples()]
             idx_map = {f"{r.machine_id} - {r.label}": r.machine_id for r in all_opts.itertuples()}
-            choice = st.selectbox("Machine", options, index=0)
+            choice = st.selectbox("Machine", options, index=0, key="book_machine")
             machine_id = idx_map[choice]
             machine_row = M[M["machine_id"]==machine_id].iloc[0]
             if machine_id not in allowed_ids:
                 st.warning("You are not licensed for this machine. (Booking will be blocked.)")
         with colB:
-            day = st.date_input("Day", value=date.today())
+            day = st.date_input("Day", value=date.today(), key="book_day")
             st.caption("Availability below updates as you change day/machine.")
 
         # Show day's bookings
@@ -220,10 +220,10 @@ with tabs[0]:
 
         # Duration slider bounded by machine max
         max_dur = int(machine_row.get("max_duration_minutes", 120) or 120)
-        dur = st.slider("Duration (minutes)", min_value=30, max_value=max_dur, step=30, value=min(60,max_dur))
+        dur = st.slider("Duration (minutes)", min_value=30, max_value=max_dur, step=30, value=min(60,max_dur), key="book_dur")
 
         # Start time picker
-        start_time = st.time_input("Start time", value=time(9,0))
+        start_time = st.time_input("Start time", value=time(9,0), key="book_start")
 
         # Validate against opening hours & overlaps
         start_dt = datetime.combine(day, start_time)
@@ -241,7 +241,7 @@ with tabs[0]:
 
         can_book = (me is not None) and (machine_id in allowed_ids) and ok_hours and (not overlap)
 
-        if st.button("Confirm booking"):
+        if st.button("Confirm booking", key="book_confirm"):
             if not can_book:
                 st.stop()
             B = sheets["Bookings"]
@@ -264,10 +264,10 @@ with tabs[1]:
     col1, col2 = st.columns([1,2])
     with col1:
         mopts = sheets["Machines"][["machine_id","machine_name"]].copy()
-        sel = st.selectbox("Machine", [f"{r.machine_id} - {r.machine_name}" for r in mopts.itertuples()], index=0)
+        sel = st.selectbox("Machine", [f"{r.machine_id} - {r.machine_name}" for r in mopts.itertuples()], index=0, key="cal_machine")
         mid = int(sel.split(" - ")[0])
-        view = st.radio("View", ["Day","Week"], horizontal=True)
-        base_day = st.date_input("Day", value=date.today())
+        view = st.radio("View", ["Day","Week"], horizontal=True, key="cal_view")
+        base_day = st.date_input("Day", value=date.today(), key="cal_day")
     with col2:
         if view=="Day":
             df = day_bookings(mid, base_day)
@@ -298,17 +298,17 @@ with tabs[2]:
         st.markdown(f"**Birth date:** {str(row.get('birth_date',''))}")
         st.divider()
         flag = bool(row.get("newsletter_opt_in", True))
-        new_flag = st.checkbox("Subscribed to newsletter", value=flag)
-        if st.button("Save subscription"):
+        new_flag = st.checkbox("Subscribed to newsletter", value=flag, key="prof_sub")
+        if st.button("Save subscription", key="prof_save_sub"):
             idx = U.index[U["user_id"]==int(me["user_id"])]
             U.loc[idx, "newsletter_opt_in"] = bool(new_flag)
             sheets["Users"] = U; save_db(sheets); st.success("Saved.")
         st.divider()
         st.markdown("### Significant events")
-        ev_name = st.text_input("Event name")
-        ev_date = st.date_input("Event date", value=date.today())
-        ev_notes = st.text_input("Notes")
-        if st.button("Add event"):
+        ev_name = st.text_input("Event name", key="prof_ev_name")
+        ev_date = st.date_input("Event date", value=date.today(), key="prof_ev_date")
+        ev_notes = st.text_input("Notes", key="prof_ev_notes")
+        if st.button("Add event", key="prof_add_ev"):
             UE = sheets.get("UserEvents", pd.DataFrame(columns=["event_id","user_id","event_name","event_date","notes"]))
             eid = int(pd.to_numeric(UE.get("event_id"), errors="coerce").fillna(0).max()) + 1 if not UE.empty else 1
             new = pd.DataFrame([[eid, int(me['user_id']), ev_name.strip(), pd.Timestamp(ev_date), ev_notes.strip()]], columns=["event_id","user_id","event_name","event_date","notes"])
@@ -326,9 +326,9 @@ with tabs[3]:
     else:
         L = sheets["Licences"]
         lic_name_to_id = {r.licence_name: r.licence_id for r in L.itertuples()}
-        sel = st.selectbox("Which skill/machine do you want help with?", ["(general)"] + list(lic_name_to_id.keys()))
-        msg = st.text_area("Describe what you need help with")
-        if st.button("Send request"):
+        sel = st.selectbox("Which skill/machine do you want help with?", ["(general)"] + list(lic_name_to_id.keys()), key="assist_skill")
+        msg = st.text_area("Describe what you need help with", key="assist_msg")
+        if st.button("Send request", key="assist_send"):
             AR = sheets["AssistanceRequests"]
             rid = int(pd.to_numeric(AR.get("request_id"), errors="coerce").fillna(0).max()) + 1 if not AR.empty else 1
             lic_id = lic_name_to_id.get(sel, None)
@@ -341,10 +341,10 @@ with tabs[4]:
     col1, col2 = st.columns(2)
     with col1:
         st.markdown("### Log an issue")
-        msel = st.selectbox("Machine", [f"{r.machine_id} - {r.machine_name}" for r in sheets["Machines"].itertuples()])
+        msel = st.selectbox("Machine", [f"{r.machine_id} - {r.machine_name}" for r in sheets["Machines"].itertuples()], key="iss_machine")
         mid = int(msel.split(" - ")[0])
-        text = st.text_area("Describe the issue")
-        if me and st.button("Submit issue"):
+        text = st.text_area("Describe the issue", key="iss_text")
+        if me and st.button("Submit issue", key="iss_submit"):
             I = sheets["Issues"]
             iid = int(pd.to_numeric(I.get("issue_id"), errors="coerce").fillna(0).max()) + 1 if not I.empty else 1
             new = pd.DataFrame([[iid, mid, int(me["user_id"]), pd.Timestamp.today(), "open", text]], columns=["issue_id","machine_id","user_id","created","status","text"])
@@ -417,7 +417,7 @@ with tabs[5]:
         # Schedule
         with at[3]:
             st.markdown("### Day roster & week utilisation")
-            d = st.date_input("Day", value=date.today(), key="adm_day")
+            d = st.date_input("Day", value=date.today(), key="adm_roster_day")
             rows = []
             for m in sheets["Machines"].itertuples():
                 for r in day_bookings(m.machine_id, d).itertuples():
