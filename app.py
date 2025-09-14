@@ -17,18 +17,16 @@ def load_db():
 
 def save_db(sheets: dict):
     import pandas as _pd
-    from pandas import ExcelWriter as _ExcelWriter
     with _pd.ExcelWriter(DB_PATH, engine="openpyxl", mode="w") as w:
         for name, df in sheets.items():
             if isinstance(df, _pd.DataFrame):
                 df.to_excel(w, sheet_name=name, index=False)
-    # IMPORTANT: ensure subsequent run reloads the updated file
     try:
-        load_db.clear()   # clears @st.cache_data for load_db()
+        load_db.clear()  # clears @st.cache_data so next run reloads the file
     except Exception:
         pass
-
-def get_setting(s,key,default=""):
+d
+ef get_setting(s,key,default=""):
     S=s.get("Settings", pd.DataFrame(columns=["key","value"]))
     m=S[S["key"]==key]
     return default if m.empty else str(m.iloc[0]["value"])
@@ -114,78 +112,128 @@ tabs=st.tabs(["Book a Machine","Calendar","Mentoring","Issues & Maintenance","Ad
 
 with tabs[0]:
     st.subheader("Book a Machine")
-    if not me: st.info("Sign in to book.")
+
+    if not me:
+        st.info("Sign in to book.")
     else:
+        # Which machines this user is allowed to book
         allowed, blocked = machine_options_for(sheets, int(me["user_id"]))
-        choice = st.selectbox("Machine", [f"{r.machine_id} - {r.machine_name}" for r in allowed.itertuples()])
-        mid=int(choice.split(" - ")[0])
-        day = st.date_input("Day", value=date.today(), format=DFMT)
-        start = st.time_input("Start time", value=time(9,0))
-        max_mins=int(sheets["Machines"].loc[sheets["Machines"]["machine_id"]==mid,"max_duration_minutes"].iloc[0])
-        dur=st.slider("Duration (minutes)", 30, max_mins, min(60,max_mins), step=30)
-        st.caption("Availability:")
-        st.dataframe(day_bookings(sheets, mid, day)[["start","end","purpose","status"]], use_container_width=True, hide_index=True)
-        end_dt = datetime.combine(day, start) + timedelta(minutes=int(dur))
-        ok_hours,msg = is_open(sheets, day, start, end_dt.time())
-        overlap=False
-        for r in day_bookings(sheets, mid, day).itertuples():
-            if not (end_dt<=r.start or datetime.combine(day,start)>=r.end):
-                overlap=True; break
-        if not ok_hours: st.error(f"Outside operating hours ({msg}).")
-        if overlap: st.error("Overlaps an existing booking.")
-        clicked=st.button("Confirm booking", type="primary", disabled=not(ok_hours and (not overlap)))
-        clicked = st.button("Confirm booking", type="primary", key="confirm_booking_btn")
 
-if clicked:
-    # Safety: ensure required tables exist
-    if "Bookings" not in sheets:
-        sheets["Bookings"] = pd.DataFrame(columns=["booking_id","user_id","machine_id","start","end","purpose","notes","status"])
+        choice = st.selectbox(
+            "Machine",
+            [f"{r.machine_id} - {r.machine_name}" for r in allowed.itertuples()],
+            key="book_machine_sel",
+        )
+        mid = int(choice.split(" - ")[0])
 
-    B = sheets["Bookings"]
+        # Inputs
+        day = st.date_input("Day", value=date.today(), format=DFMT, key="book_day")
+        start = st.time_input("Start time", value=time(9, 0), key="book_start")
 
-    # Coerce datetime for reliable overlap checks
-    def _to_ts(x):
-        return pd.to_datetime(x, errors="coerce")
-
-    # Make sure existing columns are correct dtypes
-    for c in ("start","end"):
-        if c in B.columns:
-            B[c] = _to_ts(B[c])
-
-    start_ts = pd.to_datetime(start_dt)  # you already computed start_dt earlier
-    end_ts   = pd.to_datetime(end_dt)
-
-    # Overlap on same machine (not cancelled)
-    overlap = (
-        (B.get("machine_id", pd.Series(dtype=int)) == int(mid))
-        & (B.get("status", pd.Series(dtype=str)).fillna("confirmed") != "cancelled")
-        & ~( (end_ts <= B.get("start", pd.Series(dtype="datetime64[ns]"))) | (start_ts >= B.get("end", pd.Series(dtype="datetime64[ns]"))) )
-    ).any()
-
-    if overlap:
-        st.error("That time overlaps an existing booking for this machine.")
-    else:
-        # Create next ID
-        if B.empty or "booking_id" not in B.columns:
-            next_id = 1
-        else:
-            next_id = int(pd.to_numeric(B["booking_id"], errors="coerce").fillna(0).max()) + 1
-
-        # Determine who is booking (you already have 'me' / selected user)
-        # 'me' should be a row/dict with 'user_id' for the selected member
-        uid = int(me["user_id"])
-
-        new = pd.DataFrame(
-            [[next_id, uid, int(mid), start_ts, end_ts, "use", "", "confirmed"]],
-            columns=["booking_id","user_id","machine_id","start","end","purpose","notes","status"]
+        # Respect per-machine max duration from Admin
+        max_mins = int(
+            sheets["Machines"]
+            .loc[sheets["Machines"]["machine_id"] == mid, "max_duration_minutes"]
+            .iloc[0]
+        )
+        dur = st.slider(
+            "Duration (minutes)",
+            30,
+            max_mins,
+            min(60, max_mins),
+            step=30,
+            key="book_duration",
         )
 
-        sheets["Bookings"] = pd.concat([B, new], ignore_index=True)
+        # Timing
+        start_dt = datetime.combine(day, start)
+        end_dt = start_dt + timedelta(minutes=dur)
+        st.caption(
+            f"{start_dt.strftime('%d/%m/%Y %H:%M')} → {end_dt.strftime('%H:%M')}  ({dur} min)"
+        )
 
-        # Persist + clear cache so the rerun reloads fresh data
-        save_db(sheets)
-        st.success("Booked.")
-        st.rerun()
+        # Availabilities today for this machine
+        today_rows = day_bookings(sheets, mid, day).copy()
+        show_cols = [c for c in ["start", "end", "purpose", "status", "user_id"] if c in today_rows.columns]
+        if not today_rows.empty and show_cols:
+            st.write("Availability (today):")
+            st.dataframe(
+                today_rows.sort_values("start")[show_cols],
+                use_container_width=True,
+                hide_index=True,
+            )
+        else:
+            st.write("No bookings yet today.")
+
+        # Hours open + overlap check
+        ok_hours, hours_msg = is_open(sheets, day, start_dt.time(), end_dt.time())
+        overlap = False
+        for r in today_rows.itertuples():
+            if not (end_dt <= r.start or start_dt >= r.end):
+                overlap = True
+                break
+
+        if not ok_hours:
+            st.error(f"Outside operating hours ({hours_msg}).")
+        if overlap:
+            st.error("Overlaps an existing booking.")
+
+        # ONE button only (unique key)
+        clicked = st.button(
+            "Confirm booking",
+            type="primary",
+            key="confirm_booking_btn",
+            disabled=not (ok_hours and (not overlap)),
+        )
+
+        # IMPORTANT: this must stay indented inside the tab block
+        if clicked:
+            # Ensure Bookings exists
+            if "Bookings" not in sheets:
+                sheets["Bookings"] = pd.DataFrame(
+                    columns=[
+                        "booking_id",
+                        "user_id",
+                        "machine_id",
+                        "start",
+                        "end",
+                        "purpose",
+                        "notes",
+                        "status",
+                    ]
+                )
+
+            B = sheets["Bookings"]
+
+            # Next ID
+            next_id = (
+                1
+                if B.empty
+                else int(pd.to_numeric(B["booking_id"], errors="coerce").fillna(0).max()) + 1
+            )
+
+            # Append booking
+            new = pd.DataFrame(
+                [
+                    [
+                        next_id,
+                        int(me["user_id"]),
+                        mid,
+                        start_dt,
+                        end_dt,
+                        "use",
+                        "",
+                        "confirmed",
+                    ]
+                ],
+                columns=B.columns,
+            )
+            sheets["Bookings"] = pd.concat([B, new], ignore_index=True)
+
+            # Save and force reload so the new booking shows immediately
+            save_db(sheets)   # make sure your save_db calls load_db.clear() inside
+            st.success("Booked.")
+            st.rerun()
 
 with tabs[1]:
     st.subheader("Calendar")
