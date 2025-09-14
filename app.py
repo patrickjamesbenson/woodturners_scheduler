@@ -340,10 +340,8 @@ with tabs[4]:
                 ULv = ULv.merge(U[["user_id","name"]], on="user_id", how="left")
                 ULv = ULv.merge(L[["licence_id","licence_name"]], on="licence_id", how="left")
                 # reorder if present
-                cols = [c for c in ["user_id","name","licence_id","licence_name","valid_from","valid_to","notes"] if c in ULv.columns]
-                if cols:
-                    ULv = ULv[cols]
-            st.dataframe(ULv, use_container_width=True, hide_index=True)
+                cols = [c for c in ["Member","Licence","Valid from","Valid to","user_id","licence_id"] if c in ULv.columns]
+                st.dataframe(ULv[cols] if cols else ULv, use_container_width=True, hide_index=True)
 
         with at[3]:
             st.markdown("### Competency Assessments")
